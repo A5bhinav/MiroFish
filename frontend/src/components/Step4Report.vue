@@ -65,6 +65,14 @@
           </div>
         </div>
 
+        <!-- Kalshi Probability Badge (shown after report completes) -->
+        <div v-if="isComplete && probabilities" class="kalshi-section">
+          <KalshiProbabilityBadge
+            :probabilities="probabilities"
+            :market-question="marketQuestion"
+          />
+        </div>
+
         <!-- Waiting State -->
         <div v-if="!reportOutline" class="waiting-placeholder">
           <div class="waiting-animation">
@@ -392,14 +400,16 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, getProbabilities } from '../api/report'
+import KalshiProbabilityBadge from './KalshiProbabilityBadge.vue'
 
 const router = useRouter()
 
 const props = defineProps({
   reportId: String,
   simulationId: String,
-  systemLogs: Array
+  systemLogs: Array,
+  marketQuestion: { type: String, default: '' }
 })
 
 const emit = defineEmits(['add-log', 'update-status'])
@@ -423,6 +433,7 @@ const expandedContent = ref(new Set())
 const expandedLogs = ref(new Set())
 const collapsedSections = ref(new Set())
 const isComplete = ref(false)
+const probabilities = ref(null)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -2052,6 +2063,16 @@ const fetchAgentLog = async () => {
             currentSectionIndex.value = null  // 确保清除 loading 状态
             emit('update-status', 'completed')
             stopPolling()
+            // Fetch Kalshi/Sports probabilities (404 is expected for non-betting reports)
+            if (props.reportId) {
+              getProbabilities(props.reportId).then(res => {
+                if (res?.data?.probabilities) {
+                  probabilities.value = res.data.probabilities
+                }
+              }).catch(() => {
+                // 404 is normal for non-betting reports — silently ignore
+              })
+            }
             // 滚动逻辑统一在循环结束后的 nextTick 中处理
           }
           
@@ -2203,6 +2224,10 @@ watch(() => props.reportId, (newId) => {
 </script>
 
 <style scoped>
+.kalshi-section {
+  margin: 24px 0 0 0;
+}
+
 .report-panel {
   height: 100%;
   display: flex;

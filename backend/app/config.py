@@ -58,6 +58,11 @@ class Config:
         'TREND', 'REFRESH', 'DO_NOTHING', 'FOLLOW', 'MUTE'
     ]
     
+    # Sports API keys (all optional — app starts without them)
+    BALLDONTLIE_API_KEY = os.environ.get('BALLDONTLIE_API_KEY')
+    API_FOOTBALL_KEY = os.environ.get('API_FOOTBALL_KEY')
+    ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
+
     # Report Agent配置
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))

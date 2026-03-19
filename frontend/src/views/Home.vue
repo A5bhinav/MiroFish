@@ -184,9 +184,25 @@
               </div>
             </div>
 
+            <!-- Kalshi Market Question (optional) -->
+            <div class="console-section">
+              <div class="console-header">
+                <span class="console-label">>_ 03 / Kalshi市场问题 (可选)</span>
+              </div>
+              <div class="input-wrapper">
+                <input
+                  v-model="formData.marketQuestion"
+                  class="code-input"
+                  style="padding: 10px 12px; font-size: 12px;"
+                  placeholder="// 可选: 如 'Will the Fed cut rates in June 2026?' (用于Yes/No概率预测)"
+                  :disabled="loading"
+                />
+              </div>
+            </div>
+
             <!-- 启动按钮 -->
             <div class="console-section btn-section">
-              <button 
+              <button
                 class="start-engine-btn"
                 @click="startSimulation"
                 :disabled="!canSubmit || loading"
@@ -194,6 +210,10 @@
                 <span v-if="!loading">启动引擎</span>
                 <span v-else>初始化中...</span>
                 <span class="btn-arrow">→</span>
+              </button>
+              <button class="sports-btn" @click="router.push('/sports')">
+                <span>Sports Prediction</span>
+                <span class="btn-arrow">🏀</span>
               </button>
             </div>
           </div>
@@ -215,7 +235,8 @@ const router = useRouter()
 
 // 表单数据
 const formData = ref({
-  simulationRequirement: ''
+  simulationRequirement: '',
+  marketQuestion: ''
 })
 
 // 文件列表
@@ -294,7 +315,7 @@ const startSimulation = () => {
   
   // 存储待上传的数据
   import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
+    setPendingUpload(files.value, formData.value.simulationRequirement, formData.value.marketQuestion)
     
     // 立即跳转到Process页面（使用特殊标识表示新建项目）
     router.push({
@@ -814,6 +835,29 @@ const startSimulation = () => {
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: #AAA;
+}
+
+.sports-btn {
+  width: 100%;
+  margin-top: 8px;
+  background: transparent;
+  color: var(--black);
+  border: 1px solid var(--black);
+  padding: 14px 20px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  letter-spacing: 1px;
+  transition: all 0.2s;
+}
+
+.sports-btn:hover {
+  background: var(--black);
+  color: var(--white);
 }
 
 .start-engine-btn {

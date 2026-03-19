@@ -134,7 +134,9 @@ def generate_report():
                 agent = ReportAgent(
                     graph_id=graph_id,
                     simulation_id=simulation_id,
-                    simulation_requirement=simulation_requirement
+                    simulation_requirement=simulation_requirement,
+                    market_question=project.market_question if project else None,
+                    sport_config=project.sport_config if project else None,
                 )
                 
                 # 进度回调
@@ -1013,3 +1015,34 @@ def get_graph_statistics_tool():
             "error": str(e),
             "traceback": traceback.format_exc()
         }), 500
+
+
+# ============== 概率结果接口 ==============
+
+@report_bp.route('/<report_id>/probabilities', methods=['GET'])
+def get_probabilities(report_id: str):
+    """
+    Return the probability extraction JSON for a report.
+    Available only for sports or Kalshi projects after report generation.
+
+    Returns:
+        200: { "success": true, "data": { ...probabilities... } }
+        404: report or probabilities.json not found
+    """
+    try:
+        probs_path = os.path.join(ReportManager._get_report_folder(report_id), "probabilities.json")
+        if not os.path.exists(probs_path):
+            return jsonify({
+                "success": False,
+                "error": "Probabilities not found — report may not be a sports/Kalshi project or is still generating"
+            }), 404
+
+        import json as _json
+        with open(probs_path, "r", encoding="utf-8") as f:
+            probs = _json.load(f)
+
+        return jsonify({"success": True, "data": probs})
+
+    except Exception as e:
+        logger.error(f"get_probabilities error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500

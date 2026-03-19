@@ -139,12 +139,38 @@ class OasisAgentProfile:
         }
 
 
+def generate_sports_profiles(
+    team_a_name: str,
+    team_b_name: str,
+    sport: str,
+    start_user_id: int = 1000,
+) -> list:
+    """
+    Return pre-defined expert archetype profiles for a sports matchup.
+
+    This is a thin wrapper around SportsPersonaLibrary.get_archetypes_for_sport()
+    kept here so callers that already import from oasis_profile_generator don't
+    need an extra import.
+
+    Args:
+        team_a_name: Home/first team name
+        team_b_name: Away/second team name
+        sport: "nba" or "soccer"
+        start_user_id: First user_id to assign (avoid collision with entity profiles)
+
+    Returns:
+        List of OasisAgentProfile instances
+    """
+    from .sports_persona_library import get_archetypes_for_sport
+    return get_archetypes_for_sport(sport, team_a_name, team_b_name, start_user_id)
+
+
 class OasisProfileGenerator:
     """
     OASIS Profile生成器
-    
+
     将Zep图谱中的实体转换为OASIS模拟所需的Agent Profile
-    
+
     优化特性：
     1. 调用Zep图谱检索功能获取更丰富的上下文
     2. 生成非常详细的人设（包括基本信息、职业经历、性格特征、社交媒体行为等）

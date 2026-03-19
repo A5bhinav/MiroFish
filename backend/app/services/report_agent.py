@@ -881,27 +881,33 @@ class ReportAgent:
     MAX_TOOL_CALLS_PER_CHAT = 2
     
     def __init__(
-        self, 
+        self,
         graph_id: str,
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        zep_tools: Optional[ZepToolsService] = None
+        zep_tools: Optional[ZepToolsService] = None,
+        market_question: Optional[str] = None,
+        sport_config: Optional[Dict[str, Any]] = None,
     ):
         """
         初始化Report Agent
-        
+
         Args:
             graph_id: 图谱ID
             simulation_id: 模拟ID
             simulation_requirement: 模拟需求描述
             llm_client: LLM客户端（可选）
             zep_tools: Zep工具服务（可选）
+            market_question: Kalshi market question for probability extraction (optional)
+            sport_config: SportConfig dict for sports probability extraction (optional)
         """
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
-        
+        self.market_question = market_question
+        self.sport_config = sport_config
+
         self.llm = llm_client or LLMClient()
         self.zep_tools = zep_tools or ZepToolsService()
         
@@ -1720,6 +1726,11 @@ class ReportAgent:
             
             # 保存最终报告
             ReportManager.save_report(report)
+
+            # --- Probability extraction (sports / Kalshi) ---
+            self._extract_and_save_probabilities(report_id, report.markdown_content)
+            # -------------------------------------------------
+
             ReportManager.update_progress(
                 report_id, "completed", 100, "报告生成完成",
                 completed_sections=completed_section_titles
@@ -1762,9 +1773,33 @@ class ReportAgent:
                 self.console_logger = None
             
             return report
-    
+
+    def _extract_and_save_probabilities(self, report_id: str, markdown_content: str) -> None:
+        """
+        Run probability extraction if this is a Kalshi or sports project.
+        Saves result as probabilities.json inside the report folder.
+        Errors are caught and logged non-fatally.
+        """
+        if not self.market_question and not self.sport_config:
+            return  # Regular project — skip
+
+        try:
+            from .probability_extractor import extract_kalshi, extract_sports
+
+            if self.market_question:
+                probs = extract_kalshi(markdown_content, self.market_question, self.llm)
+            else:
+                probs = extract_sports(markdown_content, self.sport_config, self.llm)
+
+            probs_path = os.path.join(ReportManager._get_report_folder(report_id), "probabilities.json")
+            with open(probs_path, "w", encoding="utf-8") as f:
+                json.dump(probs, f, ensure_ascii=False, indent=2)
+            logger.info(f"Probabilities saved to {probs_path}")
+        except Exception as e:
+            logger.warning(f"Probability extraction failed (non-fatal): {e}")
+
     def chat(
-        self, 
+        self,
         message: str,
         chat_history: List[Dict[str, str]] = None
     ) -> Dict[str, Any]:

@@ -51,7 +51,12 @@ class Project:
     
     # 错误信息
     error: Optional[str] = None
-    
+
+    # Kalshi / sports extension fields
+    market_question: Optional[str] = None
+    is_sports_project: bool = False
+    sport_config: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -69,7 +74,10 @@ class Project:
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
-            "error": self.error
+            "error": self.error,
+            "market_question": self.market_question,
+            "is_sports_project": self.is_sports_project,
+            "sport_config": self.sport_config,
         }
     
     @classmethod
@@ -94,7 +102,10 @@ class Project:
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
-            error=data.get('error')
+            error=data.get('error'),
+            market_question=data.get('market_question'),
+            is_sports_project=data.get('is_sports_project', False),
+            sport_config=data.get('sport_config'),
         )
 
 

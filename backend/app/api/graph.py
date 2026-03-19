@@ -174,6 +174,10 @@ def generate_ontology():
         # 创建项目
         project = ProjectManager.create_project(name=project_name)
         project.simulation_requirement = simulation_requirement
+        # Kalshi market question (optional)
+        market_question = request.form.get('market_question', '').strip()
+        if market_question:
+            project.market_question = market_question
         logger.info(f"创建项目: {project.project_id}")
         
         # 保存文件并提取文本

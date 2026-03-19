@@ -49,3 +49,11 @@ export const getReport = (reportId) => {
 export const chatWithReport = (data) => {
   return requestWithRetry(() => service.post('/api/report/chat', data), 3, 1000)
 }
+
+/**
+ * 获取报告的概率预测（Kalshi/Sports）
+ * @param {string} reportId
+ */
+export const getProbabilities = (reportId) => {
+  return service.get(`/api/report/${reportId}/probabilities`)
+}
