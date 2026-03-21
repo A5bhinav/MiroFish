@@ -199,9 +199,12 @@ class OasisProfileGenerator:
     
     # 群体/机构类型实体（需要生成群体代表人设）
     GROUP_ENTITY_TYPES = [
-        "university", "governmentagency", "organization", "ngo", 
+        "university", "governmentagency", "organization", "ngo",
         "mediaoutlet", "company", "institution", "group", "community"
     ]
+
+    # 每批LLM调用处理的实体数量
+    PROFILE_BATCH_SIZE = 5
     
     def __init__(
         self, 
@@ -559,8 +562,8 @@ class OasisProfileGenerator:
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
-                    # 不设置max_tokens，让LLM自由发挥
+                    temperature=0.7 - (attempt * 0.1),  # 每次重试降低温度
+                    max_tokens=1000,
                 )
                 
                 content = response.choices[0].message.content
@@ -725,7 +728,7 @@ class OasisProfileGenerator:
 请生成JSON，包含以下字段:
 
 1. bio: 社交媒体简介，200字
-2. persona: 详细人设描述（2000字的纯文本），需包含:
+2. persona: 人设描述（500字的纯文本），需包含:
    - 基本信息（年龄、职业、教育背景、所在地）
    - 人物背景（重要经历、与事件的关联、社会关系）
    - 性格特征（MBTI类型、核心性格、情绪表达方式）
@@ -774,7 +777,7 @@ class OasisProfileGenerator:
 请生成JSON，包含以下字段:
 
 1. bio: 官方账号简介，200字，专业得体
-2. persona: 详细账号设定描述（2000字的纯文本），需包含:
+2. persona: 账号设定描述（500字的纯文本），需包含:
    - 机构基本信息（正式名称、机构性质、成立背景、主要职能）
    - 账号定位（账号类型、目标受众、核心功能）
    - 发言风格（语言特点、常用表达、禁忌话题）
@@ -869,6 +872,85 @@ class OasisProfileGenerator:
                 "interested_topics": ["General", "Social Issues"],
             }
     
+    def _generate_profiles_batch_with_llm(
+        self,
+        entity_batch: List[Dict[str, Any]]
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        单次LLM调用为一批实体生成人设（减少API调用次数）
+
+        Args:
+            entity_batch: 实体数据列表，每项含 entity_id, entity_name, entity_type,
+                          entity_summary, entity_attributes, context
+
+        Returns:
+            entity_id -> profile_data 映射；失败时返回空字典
+        """
+        if not entity_batch:
+            return {}
+
+        descriptions = []
+        for ed in entity_batch:
+            attrs_str = json.dumps(ed.get("entity_attributes") or {}, ensure_ascii=False)
+            context_str = (ed.get("context") or "")[:1500]
+            descriptions.append(
+                f"### 实体（ID={ed['entity_id']}）\n"
+                f"名称: {ed['entity_name']}\n"
+                f"类型: {ed['entity_type']}\n"
+                f"摘要: {ed.get('entity_summary') or '无'}\n"
+                f"属性: {attrs_str}\n"
+                f"上下文: {context_str}"
+            )
+
+        prompt = (
+            f"为以下{len(entity_batch)}个实体分别生成社交媒体用户人设。\n\n"
+            + "\n\n".join(descriptions)
+            + """
+
+## 要求
+- bio: 简介，不超过100字
+- persona: 人设描述，不超过300字，包含性格、立场、社交媒体行为特点
+- age: 整数（机构填30）
+- gender: "male"/"female"/"other"（机构填"other"）
+- mbti: 如INTJ
+- country: 中文国名
+- profession: 职业或职能
+- interested_topics: 感兴趣话题数组（3-5个）
+
+返回JSON，profiles数组按实体顺序排列：
+{"profiles": [{"entity_id": <ID>, "bio": "...", "persona": "...", "age": 25, "gender": "male", "mbti": "INTJ", "country": "中国", "profession": "...", "interested_topics": [...]}, ...]}
+
+所有字段值不能包含换行符。"""
+        )
+
+        system_prompt = "你是社交媒体用户画像生成专家。生成简洁、真实的人设用于舆论模拟。必须返回有效的JSON格式。使用中文（gender用英文）。"
+        max_tokens = len(entity_batch) * 600
+
+        for attempt in range(2):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.7 - (attempt * 0.1),
+                    max_tokens=max_tokens,
+                )
+                content = response.choices[0].message.content
+                import re as _re
+                content = _re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                result = json.loads(content)
+                profiles_list = result.get("profiles", [])
+                return {int(p["entity_id"]): p for p in profiles_list if "entity_id" in p}
+            except Exception as e:
+                logger.warning(f"批量人设生成失败 (attempt {attempt + 1}): {str(e)[:80]}")
+                if attempt == 0:
+                    time.sleep(1)
+
+        return {}
+
     def set_graph_id(self, graph_id: str):
         """设置图谱ID用于Zep检索"""
         self.graph_id = graph_id
@@ -941,82 +1023,20 @@ class OasisProfileGenerator:
                 except Exception as e:
                     logger.warning(f"实时保存 profiles 失败: {e}")
         
-        def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
-            """生成单个profile的工作函数"""
-            entity_type = entity.get_entity_type() or "Entity"
-            
-            try:
-                profile = self.generate_profile_from_entity(
-                    entity=entity,
-                    user_id=idx,
-                    use_llm=use_llm
-                )
-                
-                # 实时输出生成的人设到控制台和日志
-                self._print_generated_profile(entity.name, entity_type, profile)
-                
-                return idx, profile, None
-                
-            except Exception as e:
-                logger.error(f"生成实体 {entity.name} 的人设失败: {str(e)}")
-                # 创建一个基础profile
-                fallback_profile = OasisAgentProfile(
-                    user_id=idx,
-                    user_name=self._generate_username(entity.name),
-                    name=entity.name,
-                    bio=f"{entity_type}: {entity.name}",
-                    persona=entity.summary or f"A participant in social discussions.",
-                    source_entity_uuid=entity.uuid,
-                    source_entity_type=entity_type,
-                )
-                return idx, fallback_profile, str(e)
-        
-        logger.info(f"开始并行生成 {total} 个Agent人设（并行数: {parallel_count}）...")
+        logger.info(f"开始生成 {total} 个Agent人设（并行上下文构建数: {parallel_count}）...")
         print(f"\n{'='*60}")
-        print(f"开始生成Agent人设 - 共 {total} 个实体，并行数: {parallel_count}")
+        print(f"开始生成Agent人设 - 共 {total} 个实体，每批{self.PROFILE_BATCH_SIZE}个LLM调用")
         print(f"{'='*60}\n")
-        
-        # 使用线程池并行执行
-        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_count) as executor:
-            # 提交所有任务
-            future_to_entity = {
-                executor.submit(generate_single_profile, idx, entity): (idx, entity)
-                for idx, entity in enumerate(entities)
-            }
-            
-            # 收集结果
-            for future in concurrent.futures.as_completed(future_to_entity):
-                idx, entity = future_to_entity[future]
+
+        if not use_llm:
+            # 规则生成路径：每个实体单独处理
+            for idx, entity in enumerate(entities):
                 entity_type = entity.get_entity_type() or "Entity"
-                
                 try:
-                    result_idx, profile, error = future.result()
-                    profiles[result_idx] = profile
-                    
-                    with lock:
-                        completed_count[0] += 1
-                        current = completed_count[0]
-                    
-                    # 实时写入文件
-                    save_profiles_realtime()
-                    
-                    if progress_callback:
-                        progress_callback(
-                            current, 
-                            total, 
-                            f"已完成 {current}/{total}: {entity.name}（{entity_type}）"
-                        )
-                    
-                    if error:
-                        logger.warning(f"[{current}/{total}] {entity.name} 使用备用人设: {error}")
-                    else:
-                        logger.info(f"[{current}/{total}] 成功生成人设: {entity.name} ({entity_type})")
-                        
+                    profile = self.generate_profile_from_entity(entity=entity, user_id=idx, use_llm=False)
                 except Exception as e:
-                    logger.error(f"处理实体 {entity.name} 时发生异常: {str(e)}")
-                    with lock:
-                        completed_count[0] += 1
-                    profiles[idx] = OasisAgentProfile(
+                    logger.error(f"规则生成人设失败 {entity.name}: {e}")
+                    profile = OasisAgentProfile(
                         user_id=idx,
                         user_name=self._generate_username(entity.name),
                         name=entity.name,
@@ -1025,8 +1045,123 @@ class OasisProfileGenerator:
                         source_entity_uuid=entity.uuid,
                         source_entity_type=entity_type,
                     )
-                    # 实时写入文件（即使是备用人设）
-                    save_profiles_realtime()
+                profiles[idx] = profile
+                self._print_generated_profile(entity.name, entity_type, profile)
+                with lock:
+                    completed_count[0] += 1
+                    current = completed_count[0]
+                save_profiles_realtime()
+                if progress_callback:
+                    progress_callback(current, total, f"已完成 {current}/{total}: {entity.name}（{entity_type}）")
+        else:
+            # LLM批量生成路径
+            # 阶段1：并行构建所有实体上下文（Zep检索，无LLM调用）
+            logger.info("阶段1: 并行构建实体上下文...")
+            entity_data_list = [None] * total
+
+            def build_context(idx: int, entity: EntityNode) -> tuple:
+                entity_type = entity.get_entity_type() or "Entity"
+                context = self._build_entity_context(entity)
+                return idx, {
+                    "entity_id": idx,
+                    "entity_name": entity.name,
+                    "entity_type": entity_type,
+                    "entity_summary": entity.summary or "",
+                    "entity_attributes": entity.attributes or {},
+                    "context": context,
+                }
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_count) as executor:
+                future_to_idx = {
+                    executor.submit(build_context, idx, entity): idx
+                    for idx, entity in enumerate(entities)
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    try:
+                        idx, data = future.result()
+                        entity_data_list[idx] = data
+                    except Exception as e:
+                        idx = future_to_idx[future]
+                        entity = entities[idx]
+                        entity_type = entity.get_entity_type() or "Entity"
+                        entity_data_list[idx] = {
+                            "entity_id": idx,
+                            "entity_name": entity.name,
+                            "entity_type": entity_type,
+                            "entity_summary": entity.summary or "",
+                            "entity_attributes": entity.attributes or {},
+                            "context": "",
+                        }
+                        logger.warning(f"构建实体上下文失败 {entity.name}: {e}")
+
+            # 阶段2：分批LLM调用（每批PROFILE_BATCH_SIZE个实体）
+            logger.info(f"阶段2: 分批LLM生成人设（每批{self.PROFILE_BATCH_SIZE}个）...")
+            llm_results: Dict[int, Dict[str, Any]] = {}
+            for batch_start in range(0, total, self.PROFILE_BATCH_SIZE):
+                batch = [e for e in entity_data_list[batch_start:batch_start + self.PROFILE_BATCH_SIZE] if e is not None]
+                batch_result = self._generate_profiles_batch_with_llm(batch)
+                llm_results.update(batch_result)
+                logger.info(f"  批次 {batch_start // self.PROFILE_BATCH_SIZE + 1}: 生成了 {len(batch_result)}/{len(batch)} 个人设")
+
+            # 阶段3：构建OasisAgentProfile对象
+            for idx, entity in enumerate(entities):
+                entity_type = entity.get_entity_type() or "Entity"
+                profile_data = llm_results.get(idx)
+
+                if profile_data:
+                    profile = OasisAgentProfile(
+                        user_id=idx,
+                        user_name=self._generate_username(entity.name),
+                        name=entity.name,
+                        bio=profile_data.get("bio", f"{entity_type}: {entity.name}"),
+                        persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {entity.name}."),
+                        karma=profile_data.get("karma", random.randint(500, 5000)),
+                        friend_count=profile_data.get("friend_count", random.randint(50, 500)),
+                        follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
+                        statuses_count=profile_data.get("statuses_count", random.randint(100, 2000)),
+                        age=profile_data.get("age"),
+                        gender=profile_data.get("gender"),
+                        mbti=profile_data.get("mbti"),
+                        country=profile_data.get("country"),
+                        profession=profile_data.get("profession"),
+                        interested_topics=profile_data.get("interested_topics", []),
+                        source_entity_uuid=entity.uuid,
+                        source_entity_type=entity_type,
+                    )
+                else:
+                    # 批量LLM未返回结果，回退到规则生成
+                    logger.warning(f"批量LLM未返回 {entity.name} 的人设，使用规则生成")
+                    rule_data = self._generate_profile_rule_based(
+                        entity.name, entity_type, entity.summary, entity.attributes or {}
+                    )
+                    profile = OasisAgentProfile(
+                        user_id=idx,
+                        user_name=self._generate_username(entity.name),
+                        name=entity.name,
+                        bio=rule_data.get("bio", f"{entity_type}: {entity.name}"),
+                        persona=rule_data.get("persona", entity.summary or f"A {entity_type} named {entity.name}."),
+                        karma=rule_data.get("karma", random.randint(500, 5000)),
+                        friend_count=rule_data.get("friend_count", random.randint(50, 500)),
+                        follower_count=rule_data.get("follower_count", random.randint(100, 1000)),
+                        statuses_count=rule_data.get("statuses_count", random.randint(100, 2000)),
+                        age=rule_data.get("age"),
+                        gender=rule_data.get("gender"),
+                        mbti=rule_data.get("mbti"),
+                        country=rule_data.get("country"),
+                        profession=rule_data.get("profession"),
+                        interested_topics=rule_data.get("interested_topics", []),
+                        source_entity_uuid=entity.uuid,
+                        source_entity_type=entity_type,
+                    )
+
+                profiles[idx] = profile
+                self._print_generated_profile(entity.name, entity_type, profile)
+                with lock:
+                    completed_count[0] += 1
+                    current = completed_count[0]
+                save_profiles_realtime()
+                if progress_callback:
+                    progress_callback(current, total, f"已完成 {current}/{total}: {entity.name}（{entity_type}）")
         
         print(f"\n{'='*60}")
         print(f"人设生成完成！共生成 {len([p for p in profiles if p])} 个Agent")

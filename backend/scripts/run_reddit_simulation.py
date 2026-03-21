@@ -464,6 +464,7 @@ class RedditSimulationRunner:
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
             model_type=llm_model,
+            model_config_dict={"max_tokens": 500},
         )
     
     def _get_active_agents_for_round(
@@ -493,22 +494,42 @@ class RedditSimulationRunner:
         
         target_count = int(random.uniform(base_min, base_max) * multiplier)
         
-        candidates = []
+        candidates = []  # (agent_id, weight)
         for cfg in agent_configs:
             agent_id = cfg.get("agent_id", 0)
             active_hours = cfg.get("active_hours", list(range(8, 23)))
             activity_level = cfg.get("activity_level", 0.5)
-            
+            posts_per_hour = float(cfg.get("posts_per_hour", 1.0))
+
             if current_hour not in active_hours:
                 continue
-            
-            if random.random() < activity_level:
-                candidates.append(agent_id)
-        
-        selected_ids = random.sample(
-            candidates, 
-            min(target_count, len(candidates))
-        ) if candidates else []
+
+            selection_prob = activity_level * min(posts_per_hour, 2.0) / 2.0
+            if random.random() < selection_prob:
+                candidates.append((agent_id, posts_per_hour))
+
+        if candidates:
+            ids, weights = zip(*candidates)
+            k = min(target_count, len(candidates))
+            selected_ids = []
+            remaining_ids = list(ids)
+            remaining_weights = list(weights)
+            total_remaining = sum(remaining_weights)
+            for _ in range(k):
+                if not remaining_ids or total_remaining <= 0:
+                    break
+                r = random.random() * total_remaining
+                cumulative = 0.0
+                chosen_idx = len(remaining_ids) - 1
+                for i, w in enumerate(remaining_weights):
+                    cumulative += w
+                    if r <= cumulative:
+                        chosen_idx = i
+                        break
+                selected_ids.append(remaining_ids.pop(chosen_idx))
+                total_remaining -= remaining_weights.pop(chosen_idx)
+        else:
+            selected_ids = []
         
         active_agents = []
         for agent_id in selected_ids:
@@ -534,7 +555,7 @@ class RedditSimulationRunner:
         print("=" * 60)
         
         time_config = self.config.get("time_config", {})
-        total_hours = time_config.get("total_simulation_hours", 72)
+        total_hours = time_config.get("total_simulation_hours", 24)
         minutes_per_round = time_config.get("minutes_per_round", 30)
         total_rounds = (total_hours * 60) // minutes_per_round
         
@@ -578,7 +599,7 @@ class RedditSimulationRunner:
             agent_graph=self.agent_graph,
             platform=oasis.DefaultPlatformType.REDDIT,
             database_path=db_path,
-            semaphore=30,  # 限制最大并发 LLM 请求数，防止 API 过载
+            semaphore=15,  # 限制最大并发 LLM 请求数，防止 API 过载和限速
         )
         
         await self.env.reset()
@@ -600,18 +621,10 @@ class RedditSimulationRunner:
                 content = post.get("content", "")
                 try:
                     agent = self.env.agent_graph.get_agent(agent_id)
-                    if agent in initial_actions:
-                        if not isinstance(initial_actions[agent], list):
-                            initial_actions[agent] = [initial_actions[agent]]
-                        initial_actions[agent].append(ManualAction(
-                            action_type=ActionType.CREATE_POST,
-                            action_args={"content": content}
-                        ))
-                    else:
-                        initial_actions[agent] = ManualAction(
-                            action_type=ActionType.CREATE_POST,
-                            action_args={"content": content}
-                        )
+                    initial_actions[agent] = ManualAction(
+                        action_type=ActionType.CREATE_POST,
+                        action_args={"content": content}
+                    )
                 except Exception as e:
                     print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
             

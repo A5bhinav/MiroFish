@@ -347,7 +347,7 @@ class SimulationRunner:
         
         # 初始化运行状态
         time_config = config.get("time_config", {})
-        total_hours = time_config.get("total_simulation_hours", 72)
+        total_hours = time_config.get("total_simulation_hours", 24)
         minutes_per_round = time_config.get("minutes_per_round", 30)
         total_rounds = int(total_hours * 60 / minutes_per_round)
         

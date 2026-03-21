@@ -1034,6 +1034,7 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
     return ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=llm_model,
+        model_config_dict={"max_tokens": 500},
     )
 
 
@@ -1062,22 +1063,46 @@ def get_active_agents_for_round(
     
     target_count = int(random.uniform(base_min, base_max) * multiplier)
     
-    candidates = []
+    # 候选列表使用 posts_per_hour 权重：高发帖频率的 agent 有更高概率被选中
+    # posts_per_hour 默认 1.0；>1.0 代表高活跃，<1.0 代表低活跃
+    candidates = []      # (agent_id, weight)
     for cfg in agent_configs:
         agent_id = cfg.get("agent_id", 0)
         active_hours = cfg.get("active_hours", list(range(8, 23)))
         activity_level = cfg.get("activity_level", 0.5)
-        
+        posts_per_hour = float(cfg.get("posts_per_hour", 1.0))
+
         if current_hour not in active_hours:
             continue
-        
-        if random.random() < activity_level:
-            candidates.append(agent_id)
-    
-    selected_ids = random.sample(
-        candidates, 
-        min(target_count, len(candidates))
-    ) if candidates else []
+
+        # 综合选中概率：activity_level × 归一化的 posts_per_hour（上限2.0）
+        selection_prob = activity_level * min(posts_per_hour, 2.0) / 2.0
+        if random.random() < selection_prob:
+            candidates.append((agent_id, posts_per_hour))
+
+    # 按 posts_per_hour 加权随机抽样，确保高活跃 agent 更频繁出现
+    if candidates:
+        ids, weights = zip(*candidates)
+        k = min(target_count, len(candidates))
+        selected_ids = []
+        remaining_ids = list(ids)
+        remaining_weights = list(weights)
+        total_remaining = sum(remaining_weights)
+        for _ in range(k):
+            if not remaining_ids or total_remaining <= 0:
+                break
+            r = random.random() * total_remaining
+            cumulative = 0.0
+            chosen_idx = len(remaining_ids) - 1
+            for i, w in enumerate(remaining_weights):
+                cumulative += w
+                if r <= cumulative:
+                    chosen_idx = i
+                    break
+            selected_ids.append(remaining_ids.pop(chosen_idx))
+            total_remaining -= remaining_weights.pop(chosen_idx)
+    else:
+        selected_ids = []
     
     active_agents = []
     for agent_id in selected_ids:
@@ -1156,7 +1181,7 @@ async def run_twitter_simulation(
         agent_graph=result.agent_graph,
         platform=oasis.DefaultPlatformType.TWITTER,
         database_path=db_path,
-        semaphore=30,  # 限制最大并发 LLM 请求数，防止 API 过载
+        semaphore=10,  # 限制最大并发 LLM 请求数，防止 API 过载和限速
     )
     
     await result.env.reset()
@@ -1212,7 +1237,7 @@ async def run_twitter_simulation(
     
     # 主模拟循环
     time_config = config.get("time_config", {})
-    total_hours = time_config.get("total_simulation_hours", 72)
+    total_hours = time_config.get("total_simulation_hours", 24)
     minutes_per_round = time_config.get("minutes_per_round", 30)
     total_rounds = (total_hours * 60) // minutes_per_round
     
@@ -1347,7 +1372,7 @@ async def run_reddit_simulation(
         agent_graph=result.agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
-        semaphore=30,  # 限制最大并发 LLM 请求数，防止 API 过载
+        semaphore=10,  # 限制最大并发 LLM 请求数，防止 API 过载和限速
     )
     
     await result.env.reset()
@@ -1375,18 +1400,10 @@ async def run_reddit_simulation(
             content = post.get("content", "")
             try:
                 agent = result.env.agent_graph.get_agent(agent_id)
-                if agent in initial_actions:
-                    if not isinstance(initial_actions[agent], list):
-                        initial_actions[agent] = [initial_actions[agent]]
-                    initial_actions[agent].append(ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    ))
-                else:
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
+                initial_actions[agent] = ManualAction(
+                    action_type=ActionType.CREATE_POST,
+                    action_args={"content": content}
+                )
                 
                 if action_logger:
                     action_logger.log_action(
@@ -1411,7 +1428,7 @@ async def run_reddit_simulation(
     
     # 主模拟循环
     time_config = config.get("time_config", {})
-    total_hours = time_config.get("total_simulation_hours", 72)
+    total_hours = time_config.get("total_simulation_hours", 24)
     minutes_per_round = time_config.get("minutes_per_round", 30)
     total_rounds = (total_hours * 60) // minutes_per_round
     
@@ -1550,7 +1567,7 @@ async def main():
     log_manager.info("=" * 60)
     
     time_config = config.get("time_config", {})
-    total_hours = time_config.get('total_simulation_hours', 72)
+    total_hours = time_config.get('total_simulation_hours', 24)
     minutes_per_round = time_config.get('minutes_per_round', 30)
     config_total_rounds = (total_hours * 60) // minutes_per_round
     

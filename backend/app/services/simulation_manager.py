@@ -425,10 +425,23 @@ class SimulationManager:
             
             state.config_generated = True
             state.config_reasoning = sim_params.generation_reasoning
-            
+
+            # ========== 后处理: 将行为参数注入到Agent persona中 ==========
+            # stance/sentiment_bias/hot_topics/narrative_direction 由LLM精心生成，
+            # 但模拟运行器只读取 persona 字段。此步骤将行为指引追加到 persona，
+            # 确保 OASIS 每轮决策时能感知到这些参数。
+            self._augment_profiles_with_behavior(
+                profiles=profiles,
+                sim_params=sim_params,
+                sim_dir=sim_dir,
+                enable_reddit=state.enable_reddit,
+                enable_twitter=state.enable_twitter,
+                generator=generator,
+            )
+
             if progress_callback:
                 progress_callback(
-                    "generating_config", 100, 
+                    "generating_config", 100,
                     "配置生成完成",
                     current=3,
                     total=3
@@ -455,6 +468,88 @@ class SimulationManager:
             self._save_simulation_state(state)
             raise
     
+    def _augment_profiles_with_behavior(
+        self,
+        profiles,
+        sim_params,
+        sim_dir: str,
+        enable_reddit: bool,
+        enable_twitter: bool,
+        generator,
+    ):
+        """
+        将行为参数注入到Agent人设中并重新保存Profile文件。
+
+        OASIS在每轮决策时只读取persona字段，而stance/sentiment_bias/hot_topics/
+        narrative_direction等参数虽然由LLM精心生成，却从未传入模拟运行器。
+        此方法将这些参数追加到每个agent的persona末尾，确保OASIS能感知到。
+        """
+        if not sim_params.agent_configs:
+            return
+
+        # 实体名称 -> 行为配置
+        name_to_cfg = {ac.entity_name: ac for ac in sim_params.agent_configs}
+
+        # 舆论背景与热点
+        event_cfg = sim_params.event_config
+        if event_cfg is None:
+            logger.warning("_augment_profiles_with_behavior: event_config is None, skipping augmentation")
+            return
+        narrative = (event_cfg.narrative_direction or "").strip()
+        hot_topics_str = "、".join(event_cfg.hot_topics[:5]) if event_cfg.hot_topics else ""
+
+        stance_map = {
+            "supportive": "支持立场",
+            "opposing": "反对立场",
+            "neutral": "中立立场",
+            "observer": "旁观立场",
+        }
+
+        def sentiment_desc(bias: float) -> str:
+            if bias >= 0.5:
+                return "积极正面"
+            if bias >= 0.1:
+                return "偏向正面"
+            if bias >= -0.1:
+                return "态度中立"
+            if bias >= -0.5:
+                return "偏向负面"
+            return "消极负面"
+
+        augmented = 0
+        for profile in profiles:
+            ac = name_to_cfg.get(profile.name)
+            if not ac:
+                continue
+
+            parts = []
+            if narrative:
+                parts.append(f"当前舆论事件：{narrative}")
+            if hot_topics_str:
+                parts.append(f"关注话题：{hot_topics_str}")
+            stance_cn = stance_map.get(ac.stance, ac.stance or "中立立场")
+            parts.append(f"我的立场：{stance_cn}，情感倾向：{sentiment_desc(ac.sentiment_bias)}")
+
+            guidance = "【行为指引】" + "。".join(parts) + "。"
+            profile.persona = (profile.persona or "") + " " + guidance
+            augmented += 1
+
+        logger.info(f"已为 {augmented} 个Agent的persona注入行为参数")
+
+        # 重新保存profile文件（覆盖之前版本）
+        if enable_reddit:
+            generator.save_profiles(
+                profiles=profiles,
+                file_path=os.path.join(sim_dir, "reddit_profiles.json"),
+                platform="reddit",
+            )
+        if enable_twitter:
+            generator.save_profiles(
+                profiles=profiles,
+                file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
+                platform="twitter",
+            )
+
     def get_simulation(self, simulation_id: str) -> Optional[SimulationState]:
         """获取模拟状态"""
         return self._load_simulation_state(simulation_id)

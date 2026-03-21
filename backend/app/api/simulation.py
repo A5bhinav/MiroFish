@@ -1495,7 +1495,7 @@ def start_simulation():
             }), 400
 
         platform = data.get('platform', 'parallel')
-        max_rounds = data.get('max_rounds')  # 可选：最大模拟轮数
+        max_rounds = data.get('max_rounds') or Config.OASIS_DEFAULT_MAX_ROUNDS  # 默认使用配置中的最大轮数限制
         enable_graph_memory_update = data.get('enable_graph_memory_update', False)  # 可选：是否启用图谱记忆更新
         force = data.get('force', False)  # 可选：强制重新开始
 
