@@ -3,12 +3,23 @@ Sports prediction API blueprint.
 
 Endpoints
 ---------
-GET  /api/sports/teams?sport=nba&league=NBA
-GET  /api/sports/players?sport=nba&team_id=2
-GET  /api/sports/odds?sport=nba&markets=h2h,spreads,totals
-POST /api/sports/ingest
+GET  /api/sports/catalog                       — list all supported sports
+GET  /api/sports/teams?sport=nfl               — teams for any sport
+GET  /api/sports/players?sport=nfl&team_id=22  — roster for a team
+GET  /api/sports/odds?sport=nfl&markets=h2h,spreads,totals
+GET  /api/sports/scoreboard?sport=nfl          — current games/scores
+POST /api/sports/ingest                        — start async ingestion
 GET  /api/sports/ingest/status/<task_id>
 GET  /api/sports/project/<project_id>/config
+POST /api/sports/predict                       — direct ML prediction
+POST /api/sports/predict/kalshi
+GET  /api/sports/models/status
+
+Supported sports (via ?sport=<key>):
+  nba, nfl, ncaaf, mlb, nhl, ncaab,
+  epl, la_liga, bundesliga, serie_a, ligue_1, mls, ucl, eredivisie, liga_mx, brazil_serie_a,
+  tennis_atp, tennis_wta, golf_pga, mma, boxing, nrl, six_nations, afl, ipl
+  (+ aliases: soccer, football, basketball, baseball, hockey, rugby, tennis, golf, cricket)
 """
 
 import traceback
@@ -25,6 +36,14 @@ from ..services.sports_data_fetcher import (
     OddsDataFetcher,
     SportsDataOrchestrator,
 )
+from ..services.sport_registry import (
+    get_sport_info,
+    get_espn_path,
+    get_odds_key,
+    list_sports,
+    resolve_sport_key,
+)
+from ..services.universal_sports_fetcher import ESPNFetcher, MLBDataFetcher
 from ..services.sports_narrative_formatter import SportsNarrativeFormatter
 from ..services.sports_ontology_templates import get_sports_ontology
 from ..services.graph_builder import GraphBuilderService
@@ -34,32 +53,63 @@ logger = get_logger("mirofish.sports_api")
 
 
 # ---------------------------------------------------------------------------
+# GET /api/sports/catalog
+# ---------------------------------------------------------------------------
+
+@sports_bp.route("/catalog", methods=["GET"])
+def get_catalog():
+    """Return the full list of supported sports with metadata."""
+    sports = list_sports()
+    return jsonify({"success": True, "data": {"sports": sports, "count": len(sports)}})
+
+
+# ---------------------------------------------------------------------------
 # GET /api/sports/teams
 # ---------------------------------------------------------------------------
 
 @sports_bp.route("/teams", methods=["GET"])
 def get_teams():
-    """Return team list for a given sport."""
+    """Return team list for any supported sport."""
     sport = request.args.get("sport", "nba").lower()
     try:
-        if sport == "nba":
-            fetcher = NBADataFetcher()
-            teams = fetcher.get_teams()
-            # Normalise to a consistent shape
-            normalised = [
-                {
-                    "id": t.get("id"),
-                    "name": t.get("full_name", f"{t.get('city', '')} {t.get('name', '')}".strip()),
-                    "city": t.get("city", ""),
-                    "abbreviation": t.get("abbreviation", ""),
-                    "conference": t.get("conference", ""),
-                    "division": t.get("division", ""),
-                }
-                for t in teams
-            ]
-            return jsonify({"success": True, "data": {"teams": normalised}})
+        canonical = resolve_sport_key(sport) or sport
+        sport_info = get_sport_info(sport)
 
-        return jsonify({"success": False, "error": f"Teams endpoint not yet implemented for sport '{sport}'"}), 400
+        # NBA: use Ball Don't Lie for richer data
+        if canonical == "nba":
+            try:
+                fetcher = NBADataFetcher()
+                teams = fetcher.get_teams()
+                normalised = [
+                    {
+                        "id": t.get("id"),
+                        "name": t.get("full_name", f"{t.get('city', '')} {t.get('name', '')}".strip()),
+                        "city": t.get("city", ""),
+                        "abbreviation": t.get("abbreviation", ""),
+                        "conference": t.get("conference", ""),
+                        "division": t.get("division", ""),
+                    }
+                    for t in teams
+                ]
+                return jsonify({"success": True, "data": {"teams": normalised, "source": "balldontlie"}})
+            except ValueError:
+                pass  # fall through to ESPN
+
+        # MLB: use official MLB API
+        if canonical == "mlb":
+            mlb = MLBDataFetcher()
+            teams = mlb.get_teams()
+            return jsonify({"success": True, "data": {"teams": teams, "source": "mlb_api"}})
+
+        # All other sports: ESPN
+        if not sport_info:
+            return jsonify({"success": False, "error": f"Unknown sport '{sport}'. See /api/sports/catalog"}), 400
+        espn_path = get_espn_path(sport)
+        if not espn_path:
+            return jsonify({"success": False, "error": f"ESPN not configured for sport '{sport}'"}), 400
+        fetcher = ESPNFetcher(*espn_path)
+        teams = fetcher.get_teams()
+        return jsonify({"success": True, "data": {"teams": teams, "source": "espn"}})
 
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 503
@@ -74,7 +124,7 @@ def get_teams():
 
 @sports_bp.route("/players", methods=["GET"])
 def get_players():
-    """Return player list for a given team."""
+    """Return roster/player list for any supported sport and team."""
     sport = request.args.get("sport", "nba").lower()
     team_id = request.args.get("team_id")
     if not team_id:
@@ -82,22 +132,43 @@ def get_players():
 
     try:
         team_id = int(team_id)
-        if sport == "nba":
-            fetcher = NBADataFetcher()
-            players = fetcher.get_players_for_team(team_id)
-            normalised = [
-                {
-                    "id": p.get("id"),
-                    "name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
-                    "position": p.get("position", ""),
-                    "jersey_number": p.get("jersey_number", ""),
-                    "status": "Active",
-                }
-                for p in players
-            ]
-            return jsonify({"success": True, "data": {"players": normalised}})
+        canonical = resolve_sport_key(sport) or sport
+        sport_info = get_sport_info(sport)
 
-        return jsonify({"success": False, "error": f"Players endpoint not yet implemented for sport '{sport}'"}), 400
+        # NBA: Ball Don't Lie preferred
+        if canonical == "nba":
+            try:
+                fetcher = NBADataFetcher()
+                players = fetcher.get_players_for_team(team_id)
+                normalised = [
+                    {
+                        "id": p.get("id"),
+                        "name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+                        "position": p.get("position", ""),
+                        "jersey_number": p.get("jersey_number", ""),
+                        "status": "Active",
+                    }
+                    for p in players
+                ]
+                return jsonify({"success": True, "data": {"players": normalised, "source": "balldontlie"}})
+            except ValueError:
+                pass  # fall through to ESPN
+
+        # MLB: official API
+        if canonical == "mlb":
+            mlb = MLBDataFetcher()
+            players = mlb.get_roster(team_id)
+            return jsonify({"success": True, "data": {"players": players, "source": "mlb_api"}})
+
+        # All other sports: ESPN
+        if not sport_info:
+            return jsonify({"success": False, "error": f"Unknown sport '{sport}'. See /api/sports/catalog"}), 400
+        espn_path = get_espn_path(sport)
+        if not espn_path:
+            return jsonify({"success": False, "error": f"ESPN not configured for sport '{sport}'"}), 400
+        fetcher = ESPNFetcher(*espn_path)
+        players = fetcher.get_roster(team_id)
+        return jsonify({"success": True, "data": {"players": players, "source": "espn"}})
 
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 503
@@ -112,26 +183,46 @@ def get_players():
 
 @sports_bp.route("/odds", methods=["GET"])
 def get_odds():
-    """Return current odds for a sport."""
+    """Return current odds for any supported sport."""
     sport = request.args.get("sport", "nba").lower()
     markets = request.args.get("markets", "h2h,spreads,totals")
+    regions = request.args.get("regions", "us")
 
-    sport_key_map = {
-        "nba": "basketball_nba",
-        "soccer": "soccer_epl",
-        "football": "soccer_epl",
-    }
-    sport_key = sport_key_map.get(sport, sport)
+    # Resolve the Odds API sport key from registry (or accept it directly)
+    sport_key = request.args.get("sport_key") or get_odds_key(sport) or sport
 
     try:
         fetcher = OddsDataFetcher()
-        games = fetcher.get_odds(sport_key, regions="us", markets=markets)
-        return jsonify({"success": True, "data": {"games": games}})
+        games = fetcher.get_odds(sport_key, regions=regions, markets=markets)
+        return jsonify({"success": True, "data": {"games": games, "sport_key": sport_key}})
 
     except ValueError as e:
         return jsonify({"success": False, "error": str(e)}), 503
     except Exception as e:
         logger.error(f"get_odds error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# GET /api/sports/scoreboard
+# ---------------------------------------------------------------------------
+
+@sports_bp.route("/scoreboard", methods=["GET"])
+def get_scoreboard():
+    """Return current/upcoming games for any supported sport via ESPN."""
+    sport = request.args.get("sport", "nba").lower()
+    sport_info = get_sport_info(sport)
+    if not sport_info:
+        return jsonify({"success": False, "error": f"Unknown sport '{sport}'. See /api/sports/catalog"}), 400
+    espn_path = get_espn_path(sport)
+    if not espn_path:
+        return jsonify({"success": False, "error": f"ESPN not configured for sport '{sport}'"}), 400
+    try:
+        fetcher = ESPNFetcher(*espn_path)
+        games = fetcher.get_scoreboard()
+        return jsonify({"success": True, "data": {"games": games, "source": "espn"}})
+    except Exception as e:
+        logger.error(f"get_scoreboard error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -173,6 +264,7 @@ def ingest():
             bet_types=body.get("bet_types", ["moneyline", "spread", "total"]),
             player_prop_players=body.get("player_prop_players", []),
             odds_sport_key=body.get("odds_sport_key", ""),
+            league_id=body.get("league_id"),
         )
 
         simulation_requirement = body.get(
@@ -215,6 +307,12 @@ def ingest():
                 # Step 2: format into text chunks
                 chunks = SportsNarrativeFormatter.format(raw_data, sport_config)
                 ingest_logger.info(f"[{task_id}] Produced {len(chunks)} narrative chunks")
+
+                # Step 2b: enrich with ML statistical priors so agents reason with hard numbers
+                from ..services.ml_prediction_service import enrich_sports_narrative_with_ml
+                chunks = enrich_sports_narrative_with_ml(chunks, sport_config.to_dict(), raw_data)
+                ingest_logger.info(f"[{task_id}] ML enrichment applied — {len(chunks)} total chunks")
+
                 task_manager.update_task(task_id, message=f"Formatted {len(chunks)} narrative chunks", progress=25)
 
                 # Step 3: build Zep graph

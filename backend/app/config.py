@@ -63,6 +63,12 @@ class Config:
     API_FOOTBALL_KEY = os.environ.get('API_FOOTBALL_KEY')
     ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
 
+    # Polymarket keys (optional — prediction-only without these; execution requires wallet)
+    POLYMARKET_API_KEY = os.environ.get('POLYMARKET_API_KEY')
+    POLYMARKET_PRIVATE_KEY = os.environ.get('POLYMARKET_PRIVATE_KEY')
+    POLYMARKET_MODE = os.environ.get('POLYMARKET_MODE', 'rest')  # "clob" or "rest"
+    POLYMARKET_DRY_RUN = os.environ.get('POLYMARKET_DRY_RUN', 'True').lower() == 'true'
+
     # Report Agent配置
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))

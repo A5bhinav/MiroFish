@@ -69,7 +69,7 @@ def extract_kalshi(
 
     user_content = (
         f"PREDICTION MARKET QUESTION:\n{market_question}\n\n"
-        f"RESEARCH REPORT:\n{report_markdown[:12000]}"  # cap to ~12k chars
+        f"RESEARCH REPORT:\n{report_markdown[:8000]}"
     )
 
     messages = [
@@ -111,9 +111,23 @@ def _validate_kalshi(result: Dict) -> None:
 # Sports probability
 # ---------------------------------------------------------------------------
 
-SPORTS_SYSTEM_PROMPT = """You are a professional sports betting analyst.
-You will read an AI-generated research report about an upcoming sports game
-and extract structured probability estimates for betting markets.
+SPORTS_SYSTEM_PROMPT = """You are a professional sports betting analyst with a track record of calibrated predictions.
+You will read an AI-generated research report about an upcoming sports game and extract
+structured probability estimates for betting markets.
+
+CRITICAL PROCESS — follow these steps IN ORDER before outputting JSON:
+1. MARKET ANCHOR: Find the BETTING ODDS section. Convert the odds to vig-free implied
+   win probabilities (normalise the raw implied probs to remove bookmaker margin).
+   This is your single most important anchor — betting markets are highly efficient.
+2. STATISTICAL PRIOR: Find the ML STATISTICAL PREDICTION section. Note the XGBoost
+   model's moneyline probability. Weight this heavily alongside the market line.
+3. INJURY ADJUSTMENT: Find the INJURY REPORT section. Missing star players (Out/Doubtful)
+   are the most under-priced factor. Adjust by 5-12 percentage points per impactful absence.
+4. SIMULATION EVIDENCE: Use the simulation agents' consensus to make smaller fine-tuning
+   adjustments (±3-5 percentage points maximum).
+5. FINAL RULE: Do NOT drift more than 12 percentage points from the market-implied
+   probability without a specific, named injury or situational factor justifying it.
+   Markets price most public information correctly.
 
 Return ONLY a valid JSON object — no markdown, no explanations outside the JSON.
 
@@ -122,7 +136,9 @@ Required JSON shape:
   "moneyline": {
     "team_a": "<team name>",
     "team_a_probability": <float 0.0-1.0>,
-    "team_b_probability": <float 0.0-1.0>
+    "team_b_probability": <float 0.0-1.0>,
+    "market_implied_team_a": <float 0.0-1.0 or null if odds unavailable>,
+    "ml_model_team_a": <float 0.0-1.0 or null if ML section absent>
   },
   "spread": {
     "line": <float, e.g. -3.5>,
@@ -142,7 +158,7 @@ Required JSON shape:
     }
   ],
   "confidence": "<low|medium|high>",
-  "reasoning_summary": "<2-4 sentence justification>"
+  "reasoning_summary": "<3-5 sentence justification: state market line used, ML model output, key injury/situational adjustments, and final rationale>"
 }
 
 Rules:
@@ -151,7 +167,9 @@ Rules:
 - total.over_probability is the probability the game goes over the total line
 - player_props can be an empty array [] if no prop data is available
 - If a market cannot be estimated, set its probability to 0.5
-- confidence reflects overall evidence quality
+- confidence = "high" only when: market line and ML model agree within 5% AND no key injuries AND simulation is consistent
+- confidence = "medium" if 1-2 meaningful uncertainties exist
+- confidence = "low" if injuries, model disagreement, or line movement creates >10% uncertainty
 """
 
 
@@ -159,14 +177,26 @@ def extract_sports(
     report_markdown: str,
     sport_config,
     llm_client: Optional[LLMClient] = None,
+    ml_prediction: Optional[Dict[str, Any]] = None,
+    n_ensemble: int = 1,
 ) -> Dict[str, Any]:
     """
     Extract structured betting probabilities from a sports report.
+
+    Makes n_ensemble LLM calls and averages the results, then blends with the
+    ML model output for a calibrated final estimate.
+
+    n_ensemble defaults to 1 — a single call is already well-calibrated when
+    blended with the ML model (35% ML / 65% LLM).  Raise to 2-3 only when you
+    need higher variance reduction and cost is not a concern.
 
     Args:
         report_markdown: The full_report.md content
         sport_config: SportConfig dataclass or dict with team/bet context
         llm_client: Optional pre-initialised LLMClient
+        ml_prediction: Optional ML model output dict (from ml_prediction_service).
+                       When provided, blended with LLM ensemble at 35/65 weight.
+        n_ensemble: Number of independent LLM extractions to average (default 1).
 
     Returns:
         Dict with keys: moneyline, spread, total, player_props, confidence,
@@ -202,18 +232,74 @@ def extract_sports(
 
     default = _default_sports_result(team_a, team_b)
 
-    try:
-        result = client.chat_json(messages, temperature=0.1, max_tokens=1500)
-        _validate_sports(result, team_a, team_b)
-        logger.info(
-            f"Sports extraction: {team_a} ml={result.get('moneyline', {}).get('team_a_probability')}, "
-            f"conf={result.get('confidence')}"
-        )
-        return result
-    except Exception as e:
-        logger.error(f"Sports extraction failed: {e}")
-        default["reasoning_summary"] = f"Probability extraction failed: {e}"
+    # --- Ensemble: run n_ensemble extractions and average ---
+    successful_results: List[Dict] = []
+    temperatures = [0.1, 0.2, 0.15][:n_ensemble]  # slight variation for diversity
+
+    for i, temp in enumerate(temperatures):
+        try:
+            r = client.chat_json(messages, temperature=temp, max_tokens=1500)
+            _validate_sports(r, team_a, team_b)
+            successful_results.append(r)
+        except Exception as e:
+            logger.warning(f"Sports extraction attempt {i+1}/{n_ensemble} failed: {e}")
+
+    if not successful_results:
+        logger.error("All sports extraction attempts failed — returning default")
+        default["reasoning_summary"] = "All probability extraction attempts failed."
         return default
+
+    # Average probabilities across ensemble
+    result = _average_sports_ensemble(successful_results, team_a, team_b)
+
+    # --- Bayesian blend with ML model output (35% ML, 65% LLM ensemble) ---
+    if ml_prediction:
+        ml_prob = ml_prediction.get("moneyline_prob")  # home team win prob
+        if ml_prob is not None:
+            lm_a = result["moneyline"]["team_a_probability"]
+            blended_a = round(0.35 * float(ml_prob) + 0.65 * lm_a, 4)
+            blended_b = round(1.0 - blended_a, 4)
+            result["moneyline"]["team_a_probability"] = blended_a
+            result["moneyline"]["team_b_probability"] = blended_b
+            result["moneyline"]["ml_model_team_a"] = round(float(ml_prob), 4)
+            logger.info(f"ML blend applied: ml={ml_prob:.3f} + llm_ensemble={lm_a:.3f} → {blended_a:.3f}")
+
+    logger.info(
+        f"Sports extraction (ensemble={len(successful_results)}): "
+        f"{team_a} p={result['moneyline']['team_a_probability']}, "
+        f"conf={result.get('confidence')}"
+    )
+    return result
+
+
+def _average_sports_ensemble(results: List[Dict], team_a: str, team_b: str) -> Dict[str, Any]:
+    """Average probabilities across multiple extraction results."""
+    if len(results) == 1:
+        return results[0]
+
+    base = results[0]
+
+    # Average moneyline
+    a_probs = [r.get("moneyline", {}).get("team_a_probability", 0.5) for r in results]
+    avg_a = round(sum(a_probs) / len(a_probs), 4)
+    base["moneyline"]["team_a_probability"] = avg_a
+    base["moneyline"]["team_b_probability"] = round(1.0 - avg_a, 4)
+
+    # Average spread cover probability
+    cover_probs = [r.get("spread", {}).get("cover_probability", 0.5) for r in results]
+    base.setdefault("spread", {})["cover_probability"] = round(sum(cover_probs) / len(cover_probs), 4)
+
+    # Average total over probability
+    over_probs = [r.get("total", {}).get("over_probability", 0.5) for r in results]
+    base.setdefault("total", {})["over_probability"] = round(sum(over_probs) / len(over_probs), 4)
+
+    # Confidence: take the most conservative (lowest confidence wins)
+    conf_rank = {"high": 2, "medium": 1, "low": 0}
+    confs = [r.get("confidence", "low") for r in results]
+    min_conf = min(confs, key=lambda c: conf_rank.get(c, 0))
+    base["confidence"] = min_conf
+
+    return base
 
 
 def _validate_sports(result: Dict, team_a: str, team_b: str) -> None:

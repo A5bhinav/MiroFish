@@ -89,8 +89,9 @@ def predict_nba_game(sport_config: Dict[str, Any],
         if games_a:
             try:
                 import pandas as pd
-                from datetime import datetime
-                last_a = pd.to_datetime(games_a[0].get("date", ""))
+                # BDL sorts games ascending by date — use max() to get most recent
+                most_recent_a = max(games_a, key=lambda g: g.get("date", ""))
+                last_a = pd.to_datetime(most_recent_a.get("date", ""))
                 today = pd.Timestamp.now()
                 home_rest = max(0, min(7, (today - last_a).days))
             except Exception:
@@ -98,7 +99,8 @@ def predict_nba_game(sport_config: Dict[str, Any],
         if games_b:
             try:
                 import pandas as pd
-                last_b = pd.to_datetime(games_b[0].get("date", ""))
+                most_recent_b = max(games_b, key=lambda g: g.get("date", ""))
+                last_b = pd.to_datetime(most_recent_b.get("date", ""))
                 today = pd.Timestamp.now()
                 away_rest = max(0, min(7, (today - last_b).days))
             except Exception:

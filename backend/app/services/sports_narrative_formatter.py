@@ -56,41 +56,44 @@ class SportsNarrativeFormatter:
             f"{', '.join(sc.bet_types) if sc.bet_types else 'all'} betting markets."
         )
 
-        # 2. Team A recent form
-        games_a = raw.get("recent_games_a", [])
-        if games_a:
-            chunks.append(SportsNarrativeFormatter._nba_team_form(team_a, sc.team_a_id, games_a))
-
-        # 3. Team B recent form
-        games_b = raw.get("recent_games_b", [])
-        if games_b:
-            chunks.append(SportsNarrativeFormatter._nba_team_form(team_b, sc.team_b_id, games_b))
-
-        # 4. Head-to-head
-        h2h = raw.get("head_to_head", [])
-        if h2h:
-            chunks.append(SportsNarrativeFormatter._nba_h2h(team_a, team_b, h2h))
-
-        # 5. Rosters
-        players_a = raw.get("players_a", [])
-        if players_a:
-            chunks.append(SportsNarrativeFormatter._nba_roster(team_a, players_a))
-
-        players_b = raw.get("players_b", [])
-        if players_b:
-            chunks.append(SportsNarrativeFormatter._nba_roster(team_b, players_b))
-
-        # 6. Season averages (prop players)
-        avgs = raw.get("season_averages", [])
-        if avgs:
-            chunks.append(SportsNarrativeFormatter._nba_season_averages(avgs, players_a + players_b))
-
-        # 7. Odds
+        # 2. Betting odds — PRIMARY market anchor, must appear early
         odds = raw.get("odds", [])
         if odds:
             chunks.append(SportsNarrativeFormatter._format_odds(team_a, team_b, odds))
 
-        # 8. Data errors / caveats
+        # 3. Injury report — highest single adjustment factor
+        injuries = raw.get("injuries", [])
+        chunks.append(SportsNarrativeFormatter._nba_injuries(team_a, team_b, injuries))
+
+        # 4. Team A recent form
+        games_a = raw.get("recent_games_a", [])
+        if games_a:
+            chunks.append(SportsNarrativeFormatter._nba_team_form(team_a, sc.team_a_id, games_a))
+
+        # 5. Team B recent form
+        games_b = raw.get("recent_games_b", [])
+        if games_b:
+            chunks.append(SportsNarrativeFormatter._nba_team_form(team_b, sc.team_b_id, games_b))
+
+        # 6. Head-to-head
+        h2h = raw.get("head_to_head", [])
+        if h2h:
+            chunks.append(SportsNarrativeFormatter._nba_h2h(team_a, team_b, h2h))
+
+        # 7. Season averages (prop players)
+        players_a = raw.get("players_a", [])
+        players_b = raw.get("players_b", [])
+        avgs = raw.get("season_averages", [])
+        if avgs:
+            chunks.append(SportsNarrativeFormatter._nba_season_averages(avgs, players_a + players_b))
+
+        # 8. Rosters (context only — low signal for probability extraction)
+        if players_a:
+            chunks.append(SportsNarrativeFormatter._nba_roster(team_a, players_a))
+        if players_b:
+            chunks.append(SportsNarrativeFormatter._nba_roster(team_b, players_b))
+
+        # 9. Data errors / caveats
         errors = raw.get("errors", [])
         if errors:
             caveats = "\n".join(f"- {e}" for e in errors)
@@ -214,6 +217,31 @@ class SportsNarrativeFormatter:
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def _nba_injuries(team_a: str, team_b: str, injuries: List[Dict]) -> str:
+        lines = [f"INJURY REPORT — {team_a.upper()} vs {team_b.upper()}\n"]
+        if not injuries:
+            lines.append(
+                "No injury designations reported for either team. "
+                "Assume full roster availability unless noted elsewhere."
+            )
+            return "\n".join(lines)
+
+        for inj in injuries:
+            player = inj.get("player", {})
+            name = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip() or "Unknown"
+            team = inj.get("team", {}).get("full_name", "Unknown Team")
+            status = inj.get("status", "Unknown")
+            description = inj.get("description", "No description provided")
+            lines.append(f"  {name} ({team}) — {status.upper()}: {description}")
+
+        lines.append(
+            "\nNOTE: OUT and DOUBTFUL designations for star players (25+ PPG) are "
+            "the single largest accuracy lever for game predictions. Each key absence "
+            "shifts win probability by 5-15 percentage points depending on position and role."
+        )
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
     # Soccer Formatting
     # ------------------------------------------------------------------
@@ -234,32 +262,32 @@ class SportsNarrativeFormatter:
             f"{', '.join(sc.bet_types) if sc.bet_types else 'all'} markets."
         )
 
-        # 2. Recent form both teams
+        # 2. Betting odds — PRIMARY market anchor, must appear early
+        odds = raw.get("odds", [])
+        if odds:
+            chunks.append(SportsNarrativeFormatter._format_odds(team_a, team_b, odds))
+
+        # 3. Standings (strong situational signal — form in context of table position)
+        standings = raw.get("standings", [])
+        if standings:
+            chunks.append(SportsNarrativeFormatter._soccer_standings(team_a, team_b, standings, sc.league))
+
+        # 4. Recent form both teams
         for team_name, games_key in [(team_a, "recent_games_a"), (team_b, "recent_games_b")]:
             games = raw.get(games_key, [])
             if games:
                 chunks.append(SportsNarrativeFormatter._soccer_team_form(team_name, games))
 
-        # 3. Head-to-head
+        # 5. Head-to-head
         h2h = raw.get("head_to_head", [])
         if h2h:
             chunks.append(SportsNarrativeFormatter._soccer_h2h(team_a, team_b, h2h))
 
-        # 4. Squads
+        # 6. Squads (context only — low signal for probability extraction)
         for team_name, pkey in [(team_a, "players_a"), (team_b, "players_b")]:
             players = raw.get(pkey, [])
             if players:
                 chunks.append(SportsNarrativeFormatter._soccer_squad(team_name, players))
-
-        # 5. Standings
-        standings = raw.get("standings", [])
-        if standings:
-            chunks.append(SportsNarrativeFormatter._soccer_standings(team_a, team_b, standings, sc.league))
-
-        # 6. Odds
-        odds = raw.get("odds", [])
-        if odds:
-            chunks.append(SportsNarrativeFormatter._format_odds(team_a, team_b, odds))
 
         # 7. Caveats
         errors = raw.get("errors", [])
