@@ -176,8 +176,27 @@ const form = ref({
 
 const propPlayersText = ref('')
 const sports = [
-  { value: 'nba', label: 'NBA' },
-  { value: 'soccer', label: 'Soccer' }
+  { value: 'nba',          label: 'NBA' },
+  { value: 'ncaab',        label: 'NCAA Basketball' },
+  { value: 'nfl',          label: 'NFL' },
+  { value: 'ncaaf',        label: 'NCAA Football' },
+  { value: 'mlb',          label: 'MLB' },
+  { value: 'nhl',          label: 'NHL' },
+  { value: 'epl',          label: 'Premier League' },
+  { value: 'la_liga',      label: 'La Liga' },
+  { value: 'bundesliga',   label: 'Bundesliga' },
+  { value: 'serie_a',      label: 'Serie A' },
+  { value: 'ligue_1',      label: 'Ligue 1' },
+  { value: 'mls',          label: 'MLS' },
+  { value: 'ucl',          label: 'Champions League' },
+  { value: 'tennis_atp',   label: 'ATP Tennis' },
+  { value: 'tennis_wta',   label: 'WTA Tennis' },
+  { value: 'golf_pga',     label: 'PGA Tour' },
+  { value: 'mma',          label: 'UFC / MMA' },
+  { value: 'boxing',       label: 'Boxing' },
+  { value: 'nrl',          label: 'NRL Rugby' },
+  { value: 'afl',          label: 'AFL' },
+  { value: 'ipl',          label: 'IPL Cricket' },
 ]
 const betTypeOptions = [
   { value: 'moneyline', label: 'Moneyline' },

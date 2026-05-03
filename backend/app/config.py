@@ -69,6 +69,12 @@ class Config:
     POLYMARKET_MODE = os.environ.get('POLYMARKET_MODE', 'rest')  # "clob" or "rest"
     POLYMARKET_DRY_RUN = os.environ.get('POLYMARKET_DRY_RUN', 'True').lower() == 'true'
 
+    # Kalshi keys (optional — prediction works without; trading requires both)
+    KALSHI_API_KEY = os.environ.get('KALSHI_API_KEY')
+    KALSHI_PRIVATE_KEY = os.environ.get('KALSHI_PRIVATE_KEY')   # RSA PEM string
+    KALSHI_DEMO = os.environ.get('KALSHI_DEMO', 'False').lower() == 'true'
+    KALSHI_DRY_RUN = os.environ.get('KALSHI_DRY_RUN', 'True').lower() == 'true'
+
     # Report Agent配置
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
