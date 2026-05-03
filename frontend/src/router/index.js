@@ -7,12 +7,24 @@ import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
 import SportsView from '../views/SportsView.vue'
 import SportsProbabilityView from '../views/SportsProbabilityView.vue'
+import KalshiView from '../views/KalshiView.vue'
+import PolymarketView from '../views/PolymarketView.vue'
 
 const routes = [
   {
     path: '/',
     name: 'Home',
     component: Home
+  },
+  {
+    path: '/kalshi',
+    name: 'Kalshi',
+    component: KalshiView
+  },
+  {
+    path: '/polymarket',
+    name: 'Polymarket',
+    component: PolymarketView
   },
   {
     path: '/process/:projectId',

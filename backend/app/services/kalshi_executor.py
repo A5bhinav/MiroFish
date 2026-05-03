@@ -152,6 +152,10 @@ class KalshiExecutor:
         Returns:
             Order confirmation dict or None on failure.
         """
+        # Validate price range before anything else
+        if not (0 < price < 1):
+            raise ValueError(f"Price must be in (0, 1) probability range, got {price}")
+
         # Apply Kelly sizing
         sized_amount = amount * kelly_fraction
         if sized_amount < 1.0:

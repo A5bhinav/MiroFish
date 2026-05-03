@@ -102,12 +102,17 @@ class PolymarketExecutor:
             raise ValueError("POLYMARKET_PRIVATE_KEY required for CLOB mode")
 
         try:
-            # ClobClient(host, chain_id, key) — correct param names for py-clob-client >= 0.10
-            self.client = ClobClient(
-                host="https://clob.polymarket.com",
-                chain_id=137,  # Polygon mainnet
-                key=self.private_key,
-            )
+            import socket
+            old_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(10)
+            try:
+                self.client = ClobClient(
+                    host="https://clob.polymarket.com",
+                    chain_id=137,  # Polygon mainnet
+                    key=self.private_key,
+                )
+            finally:
+                socket.setdefaulttimeout(old_timeout)
             self.connected = True
             logger.info("py-clob-client connected to Polymarket CLOB")
         except Exception as e:
@@ -268,7 +273,16 @@ class PolymarketExecutor:
             }
         except Exception as e:
             logger.error(f"REST order failed: {e}")
-            raise
+            return {
+                "order_id": None,
+                "status": "failed",
+                "market_id": market_id,
+                "side": side,
+                "amount": amount,
+                "price": price,
+                "timestamp": datetime.utcnow().isoformat(),
+                "error": str(e),
+            }
 
     # =========================================================================
     # Order Management

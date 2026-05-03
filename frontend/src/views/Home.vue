@@ -215,6 +215,14 @@
                 <span>Sports Prediction</span>
                 <span class="btn-arrow">🏀</span>
               </button>
+              <button class="sports-btn kalshi-btn" @click="router.push('/kalshi')">
+                <span>Kalshi Markets</span>
+                <span class="btn-arrow">◈</span>
+              </button>
+              <button class="sports-btn poly-btn" @click="router.push('/polymarket')">
+                <span>Polymarket</span>
+                <span class="btn-arrow">◆</span>
+              </button>
             </div>
           </div>
         </div>
@@ -859,6 +867,12 @@ const startSimulation = () => {
   background: var(--black);
   color: var(--white);
 }
+
+.kalshi-btn { border-color: #0ea5e9; color: #0ea5e9; }
+.kalshi-btn:hover { background: #0ea5e9; color: #fff; }
+
+.poly-btn { border-color: #6d28d9; color: #6d28d9; }
+.poly-btn:hover { background: #6d28d9; color: #fff; }
 
 .start-engine-btn {
   width: 100%;
