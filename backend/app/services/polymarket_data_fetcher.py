@@ -157,7 +157,8 @@ def _parse_market(raw: Dict) -> Dict:
         try:
             clean = end_str.replace("Z", "").split(".")[0]
             end_dt = datetime.fromisoformat(clean)
-            days_to_close = max(1, (end_dt - datetime.utcnow()).days)
+            delta_seconds = (end_dt - datetime.utcnow()).total_seconds()
+            days_to_close = max(0.01, delta_seconds / 86400.0)
         except Exception:
             pass
 

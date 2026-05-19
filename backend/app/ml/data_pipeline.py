@@ -488,50 +488,326 @@ def get_all_economic_indicators() -> Optional[pd.DataFrame]:
     return merged
 
 
+def get_manifold_predictions(limit: int = 2000) -> Optional[pd.DataFrame]:
+    """
+    Download resolved binary markets from Manifold Markets (free, no key).
+
+    Uses /v0/search-markets with filter=resolved&contractType=BINARY.
+    `resolutionProbability` is the market's closing probability at resolution
+    time — the correct calibration signal (analogous to Metaculus community_prediction).
+
+    Returns: question, community_prob, resolution (0/1), category, source="manifold"
+    """
+    dest = DATA_DIR / "manifold_resolved.json"
+    if _cached(dest, max_age_hours=48) and dest.exists():
+        with open(dest) as f:
+            rows = json.load(f)
+        df = pd.DataFrame(rows)
+        logger.info(f"Manifold (cached): {len(df):,} resolved binary questions")
+        return df
+
+    logger.info("Fetching Manifold resolved binary markets...")
+    rows = []
+    offset = 0
+    headers = {"User-Agent": "MiroFish-ML/1.0"}
+
+    while len(rows) < limit:
+        params = {
+            "limit": 100,
+            "sort": "score",
+            "filter": "resolved",
+            "contractType": "BINARY",
+            "offset": offset,
+        }
+        try:
+            resp = requests.get(
+                "https://api.manifold.markets/v0/search-markets",
+                params=params, headers=headers, timeout=20
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Manifold returned {resp.status_code} at offset {offset}")
+                break
+            batch = resp.json()
+        except Exception as e:
+            logger.warning(f"Manifold fetch failed: {e}")
+            break
+
+        if not batch:
+            break
+
+        for m in batch:
+            resolution = m.get("resolution")
+            # resolutionProbability = market prob at resolution time (best calibration signal)
+            prob = m.get("resolutionProbability")
+            if resolution not in ("YES", "NO") or prob is None:
+                continue
+            rows.append({
+                "question": m.get("question", ""),
+                "category": (m.get("groupSlugs") or ["unknown"])[0],
+                "community_prob": round(float(prob), 4),
+                "resolution": 1 if resolution == "YES" else 0,
+                "resolve_time": m.get("resolutionTime"),
+                "close_time": m.get("closeTime"),
+                "source": "manifold",
+            })
+
+        offset += len(batch)
+        if len(batch) < 100:
+            break
+        time.sleep(0.2)
+
+    if not rows:
+        logger.warning("Manifold: no resolved markets retrieved")
+        return None
+
+    with open(dest, "w") as f:
+        json.dump(rows, f)
+
+    df = pd.DataFrame(rows)
+    logger.info(f"Manifold: {len(df):,} resolved binary questions saved")
+    return df
+
+
 def get_metaculus_predictions(limit: int = 2000) -> Optional[pd.DataFrame]:
     """
-    Download resolved binary predictions from Metaculus public API (no key).
-    Returns: question, resolution (0/1), community_probability, ...
-    Used to calibrate the Kalshi base-rate model.
-    """
-    dest = DATA_DIR / "metaculus_resolved.json"
-    if _cached(dest, max_age_hours=48):
-        with open(dest) as f:
-            data = json.load(f)
-    else:
-        url = f"https://www.metaculus.com/api2/questions/?limit={limit}&resolved=true&type=binary&order_by=-resolve_time"
-        try:
-            resp = requests.get(url, timeout=30, headers={"User-Agent": "MiroFish-ML/1.0"})
-            resp.raise_for_status()
-            data = resp.json()
-            with open(dest, "w") as f:
-                json.dump(data, f)
-        except Exception as e:
-            logger.warning(f"Metaculus fetch failed: {e}")
-            return None
+    Download resolved binary predictions from calibration sources.
 
-    try:
-        results = data.get("results", [])
-        rows = []
-        for q in results:
-            comm_pred = q.get("community_prediction", {})
-            latest = comm_pred.get("full", {}).get("q2") if isinstance(comm_pred, dict) else None
-            resolution = q.get("resolution")
-            if latest is not None and resolution in [0, 1]:
-                rows.append({
-                    "question": q.get("title", ""),
-                    "category": q.get("category_tags", [None])[0] if q.get("category_tags") else "unknown",
-                    "community_prob": float(latest),
-                    "resolution": int(resolution),
-                    "resolve_time": q.get("resolve_time"),
-                    "close_time": q.get("close_time"),
-                })
-        df = pd.DataFrame(rows)
-        logger.info(f"Metaculus: {len(df):,} resolved binary questions")
-        return df
-    except Exception as e:
-        logger.error(f"Failed to parse Metaculus data: {e}")
+    Priority:
+      1. Manifold Markets (free public API, no key, thousands of questions)
+      2. Locally cached snapshots from collect_market_snapshots()
+      3. Returns None (triggers fallback calibrator in KalshiPredictor)
+
+    Metaculus v2 API now returns 403 for unauthenticated requests.
+    If you have a Metaculus API token, set METACULUS_API_KEY in .env to
+    re-enable it — but Manifold covers the same calibration use case.
+    """
+    import os
+
+    frames = []
+
+    # --- Manifold (primary free source) ---
+    mf = get_manifold_predictions(limit=limit)
+    if mf is not None and len(mf) >= 100:
+        frames.append(mf)
+        logger.info(f"Calibration: using {len(mf):,} Manifold questions")
+
+    # --- Metaculus v3 (optional, requires API token) ---
+    metaculus_key = os.environ.get("METACULUS_API_KEY")
+    if metaculus_key:
+        dest = DATA_DIR / "metaculus_resolved.json"
+        if not _cached(dest, max_age_hours=48):
+            url = f"https://www.metaculus.com/api2/questions/?limit={limit}&resolved=true&type=binary&order_by=-resolve_time"
+            try:
+                resp = requests.get(
+                    url, timeout=30,
+                    headers={"User-Agent": "MiroFish-ML/1.0", "Authorization": f"Token {metaculus_key}"}
+                )
+                resp.raise_for_status()
+                with open(dest, "w") as f:
+                    json.dump(resp.json(), f)
+            except Exception as e:
+                logger.warning(f"Metaculus fetch failed: {e}")
+
+        if dest.exists():
+            try:
+                with open(dest) as f:
+                    data = json.load(f)
+                results = data.get("results", [])
+                meta_rows = []
+                for q in results:
+                    comm_pred = q.get("community_prediction", {})
+                    latest = comm_pred.get("full", {}).get("q2") if isinstance(comm_pred, dict) else None
+                    resolution = q.get("resolution")
+                    if latest is not None and resolution in [0, 1]:
+                        meta_rows.append({
+                            "question": q.get("title", ""),
+                            "category": (q.get("category_tags") or ["unknown"])[0],
+                            "community_prob": float(latest),
+                            "resolution": int(resolution),
+                            "resolve_time": q.get("resolve_time"),
+                            "close_time": q.get("close_time"),
+                            "source": "metaculus",
+                        })
+                if meta_rows:
+                    frames.append(pd.DataFrame(meta_rows))
+                    logger.info(f"Calibration: using {len(meta_rows):,} Metaculus questions")
+            except Exception as e:
+                logger.warning(f"Metaculus parse failed: {e}")
+
+    # --- Local snapshots (built by collect_market_snapshots) ---
+    snapshot_path = DATA_DIR / "market_snapshots_resolved.csv"
+    if snapshot_path.exists():
+        try:
+            snap = pd.read_csv(snapshot_path)
+            if len(snap) >= 50:
+                frames.append(snap[["question", "category", "community_prob", "resolution", "source"]])
+                logger.info(f"Calibration: using {len(snap):,} local snapshots")
+        except Exception as e:
+            logger.warning(f"Snapshot load failed: {e}")
+
+    if not frames:
+        logger.warning("No calibration data available — Kalshi predictor will use fallback")
         return None
+
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["question"])
+    logger.info(f"Total calibration data: {len(combined):,} resolved questions")
+    return combined
+
+
+def collect_market_snapshots(
+    kalshi_fetcher=None,
+    polymarket_fetcher=None,
+    max_markets: int = 200,
+) -> int:
+    """
+    Snapshot current market prices to disk for use as future training data.
+
+    Call this daily (e.g. via cron or a scheduled script).  When markets
+    resolve, run resolve_market_snapshots() to pair prices with outcomes.
+
+    Returns number of snapshots saved.
+    """
+    snapshot_path = DATA_DIR / "market_snapshots_open.csv"
+    existing = []
+    if snapshot_path.exists():
+        try:
+            existing = pd.read_csv(snapshot_path).to_dict("records")
+        except Exception:
+            pass
+
+    seen_ids = {r["market_id"] for r in existing}
+    new_rows = []
+    today = pd.Timestamp.utcnow().isoformat()
+
+    if polymarket_fetcher:
+        try:
+            markets = polymarket_fetcher.get_active_markets(limit=max_markets)
+            for m in markets:
+                mid = m.get("id") or m.get("market_id")
+                if not mid or mid in seen_ids:
+                    continue
+                new_rows.append({
+                    "market_id": mid,
+                    "platform": "polymarket",
+                    "question": m.get("question", ""),
+                    "category": m.get("category", "unknown"),
+                    "community_prob": m.get("yes_price", 0.5),
+                    "days_to_close": m.get("days_to_close", 30),
+                    "snapshotted_at": today,
+                    "resolution": None,
+                    "source": "polymarket",
+                })
+                seen_ids.add(mid)
+        except Exception as e:
+            logger.warning(f"Polymarket snapshot failed: {e}")
+
+    if kalshi_fetcher:
+        try:
+            markets = kalshi_fetcher.get_active_markets(limit=max_markets)
+            for m in markets:
+                mid = m.get("ticker")
+                if not mid or mid in seen_ids:
+                    continue
+                new_rows.append({
+                    "market_id": mid,
+                    "platform": "kalshi",
+                    "question": m.get("question", ""),
+                    "category": m.get("category", "unknown"),
+                    "community_prob": m.get("yes_price", 0.5),
+                    "days_to_close": m.get("days_to_close", 30),
+                    "snapshotted_at": today,
+                    "resolution": None,
+                    "source": "kalshi",
+                })
+                seen_ids.add(mid)
+        except Exception as e:
+            logger.warning(f"Kalshi snapshot failed: {e}")
+
+    if new_rows:
+        all_rows = existing + new_rows
+        pd.DataFrame(all_rows).to_csv(snapshot_path, index=False)
+        logger.info(f"Snapshots: saved {len(new_rows)} new, {len(all_rows)} total")
+
+    return len(new_rows)
+
+
+def resolve_market_snapshots(
+    kalshi_fetcher=None,
+    polymarket_fetcher=None,
+) -> int:
+    """
+    Check open snapshots for resolution and move them to the resolved set.
+
+    A snapshot is considered resolved when the market is closed and has a
+    definitive YES (1.0) or NO (0.0) price.  Resolved rows are appended to
+    market_snapshots_resolved.csv and removed from the open set.
+
+    Returns number of newly resolved markets.
+    """
+    open_path = DATA_DIR / "market_snapshots_open.csv"
+    resolved_path = DATA_DIR / "market_snapshots_resolved.csv"
+
+    if not open_path.exists():
+        return 0
+
+    df = pd.read_csv(open_path)
+    open_mask = df["resolution"].isna()
+    to_check = df[open_mask].copy()
+
+    if to_check.empty:
+        return 0
+
+    resolved_rows = []
+    still_open_idx = []
+
+    for idx, row in to_check.iterrows():
+        platform = row["platform"]
+        mid = row["market_id"]
+        resolved = None
+
+        try:
+            if platform == "polymarket" and polymarket_fetcher:
+                pricing = polymarket_fetcher.get_current_price(mid)
+                if pricing:
+                    yp = pricing.get("yes_price", 0.5)
+                    if yp >= 0.98:
+                        resolved = 1
+                    elif yp <= 0.02:
+                        resolved = 0
+            elif platform == "kalshi" and kalshi_fetcher:
+                market = kalshi_fetcher.get_market(mid)
+                if market:
+                    yp = market.get("yes_price", 0.5)
+                    if yp >= 0.98:
+                        resolved = 1
+                    elif yp <= 0.02:
+                        resolved = 0
+        except Exception as e:
+            logger.debug(f"Resolution check failed for {mid}: {e}")
+
+        if resolved is not None:
+            r = row.to_dict()
+            r["resolution"] = resolved
+            resolved_rows.append(r)
+        else:
+            still_open_idx.append(idx)
+
+    if resolved_rows:
+        new_resolved = pd.DataFrame(resolved_rows)
+        if resolved_path.exists():
+            existing = pd.read_csv(resolved_path)
+            combined = pd.concat([existing, new_resolved], ignore_index=True)
+        else:
+            combined = new_resolved
+        combined.to_csv(resolved_path, index=False)
+
+        remaining = df.loc[still_open_idx].reset_index(drop=True)
+        not_checked = df[~open_mask]
+        pd.concat([not_checked, remaining], ignore_index=True).to_csv(open_path, index=False)
+
+        logger.info(f"Resolved {len(resolved_rows)} markets; {len(still_open_idx)} still open")
+
+    return len(resolved_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -560,9 +836,13 @@ def download_all(verbose: bool = True) -> dict:
     df = get_all_economic_indicators()
     results["economic"] = len(df) if df is not None else None
 
-    print("Downloading Metaculus predictions...")
+    print("Downloading Manifold resolved markets (calibration data)...")
+    df = get_manifold_predictions(limit=5000)
+    results["manifold"] = len(df) if df is not None else None
+
+    print("Aggregating calibration data (Manifold + Metaculus + snapshots)...")
     df = get_metaculus_predictions()
-    results["metaculus"] = len(df) if df is not None else None
+    results["calibration_total"] = len(df) if df is not None else None
 
     if verbose:
         print("\n=== Download Summary ===")

@@ -70,7 +70,14 @@ def _sign_request(api_key_id: str, private_key_pem: str, method: str, path: str)
 
         ts = str(int(time.time() * 1000))
         msg = (ts + method.upper() + path).encode()
-        sig = private_key.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
+        sig = private_key.sign(
+            msg,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
 
         return {
             "KALSHI-ACCESS-KEY": api_key_id,
@@ -123,6 +130,65 @@ def _get(path: str, params: Dict = None, ttl: float = 0) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Category inference from event_ticker prefix
+# ---------------------------------------------------------------------------
+
+_TICKER_CATEGORY_MAP = [
+    ("KXMLB",  "sports"),
+    ("KXNBA",  "sports"),
+    ("KXNFL",  "sports"),
+    ("KXNHL",  "sports"),
+    ("KXNCC",  "sports"),
+    ("KXCFB",  "sports"),
+    ("KXMLS",  "sports"),
+    ("KXSOC",  "sports"),
+    ("KXTEN",  "sports"),
+    ("KXMMA",  "sports"),
+    ("KXBOX",  "sports"),
+    ("KXNAS",  "sports"),
+    ("KXF1",   "sports"),
+    ("KXPGA",  "sports"),
+    ("KXGOLF", "sports"),
+    ("KXEPL",  "sports"),
+    ("INX",    "economics"),
+    ("SP500",  "economics"),
+    ("NASDAQ", "economics"),
+    ("FOMC",   "economics"),
+    ("CPI",    "economics"),
+    ("NFP",    "economics"),
+    ("GDP",    "economics"),
+    ("FED",    "economics"),
+    ("OIL",    "economics"),
+    ("GOLD",   "economics"),
+    ("BTC",    "crypto"),
+    ("ETH",    "crypto"),
+    ("CRYPTO", "crypto"),
+    ("PRES",   "politics"),
+    ("SEN",    "politics"),
+    ("HOUSE",  "politics"),
+    ("REPUB",  "politics"),
+    ("DEMO",   "politics"),
+    ("ELEC",   "politics"),
+    ("TEMP",   "weather"),
+    ("WIND",   "weather"),
+    ("RAIN",   "weather"),
+    ("HURR",   "weather"),
+]
+
+
+def _infer_category(raw: Dict) -> str:
+    """Derive a human category from the API category field or event_ticker prefix."""
+    cat = (raw.get("category") or "").strip().lower()
+    if cat and cat != "unknown":
+        return cat
+    event_ticker = (raw.get("event_ticker") or raw.get("ticker") or "").upper()
+    for prefix, category in _TICKER_CATEGORY_MAP:
+        if event_ticker.startswith(prefix):
+            return category
+    return "other"
+
+
+# ---------------------------------------------------------------------------
 # Market normalization
 # ---------------------------------------------------------------------------
 
@@ -132,14 +198,19 @@ def _parse_market(raw: Dict) -> Dict:
 
     Key transformations:
       - Cents (1-99) → probabilities (0.01-0.99) for yes/no prices
+      - None prices (illiquid markets) → None, with has_price=False flag
       - close_time ISO string → days_to_close int
-      - Expose both 'id' and 'ticker' so callers can use either
+      - Category derived from event_ticker when API returns null
     """
-    def _cents(v, default: int = 50) -> int:
+    def _cents_to_prob(v) -> Optional[float]:
+        """Convert a cents integer (1-99) to probability, or None if missing/zero."""
+        if v is None:
+            return None
         try:
-            return int(v or default)
+            c = int(v)
+            return round(c / 100, 4) if c > 0 else None
         except (ValueError, TypeError):
-            return default
+            return None
 
     def _flt(v, default: float = 0.0) -> float:
         try:
@@ -147,13 +218,35 @@ def _parse_market(raw: Dict) -> Dict:
         except (ValueError, TypeError):
             return default
 
-    yes_bid_c = _cents(raw.get("yes_bid"), 50)
-    yes_ask_c = _cents(raw.get("yes_ask"), 50)
-    no_bid_c  = _cents(raw.get("no_bid"),  50)
-    no_ask_c  = _cents(raw.get("no_ask"),  50)
+    yes_bid = _cents_to_prob(raw.get("yes_bid"))
+    yes_ask = _cents_to_prob(raw.get("yes_ask"))
+    no_bid  = _cents_to_prob(raw.get("no_bid"))
+    no_ask  = _cents_to_prob(raw.get("no_ask"))
 
-    yes_price = max(0.01, min(0.99, (yes_bid_c + yes_ask_c) / 200))
-    no_price  = max(0.01, min(0.99, (no_bid_c  + no_ask_c)  / 200))
+    # Compute mid-prices only when bid+ask both exist; otherwise use last price
+    has_price = yes_bid is not None and yes_ask is not None
+    if has_price:
+        yes_price = round(max(0.01, min(0.99, (yes_bid + yes_ask) / 2)), 4)
+        no_price  = round(max(0.01, min(0.99, (no_bid  + no_ask)  / 2 if (no_bid and no_ask) else 1 - yes_price)), 4)
+    else:
+        # Fall back to last_price_dollars if available
+        last_str = raw.get("last_price_dollars") or raw.get("previous_price_dollars")
+        if last_str:
+            try:
+                lp = float(last_str)
+                if 0 < lp < 1:
+                    yes_price = round(lp, 4)
+                    no_price  = round(1 - lp, 4)
+                    has_price = True
+                else:
+                    yes_price = None
+                    no_price  = None
+            except (ValueError, TypeError):
+                yes_price = None
+                no_price  = None
+        else:
+            yes_price = None
+            no_price  = None
 
     # days to close
     days_to_close = 30
@@ -161,22 +254,21 @@ def _parse_market(raw: Dict) -> Dict:
     if close_str:
         try:
             close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
-            delta = (close_dt - datetime.now(timezone.utc)).days
-            days_to_close = max(1, delta)
+            delta_seconds = (close_dt - datetime.now(timezone.utc)).total_seconds()
+            days_to_close = max(0.01, delta_seconds / 86400.0)
         except Exception:
             pass
 
-    volume    = _flt(raw.get("volume", 0))
+    volume     = _flt(raw.get("volume", 0))
     volume_24h = _flt(raw.get("volume_24h", 0))
     liquidity  = _flt(raw.get("liquidity", 0))
 
     ticker   = raw.get("ticker", "")
     title    = raw.get("title", "")
-    category = (raw.get("category") or "unknown").lower()
+    category = _infer_category(raw)
 
     return {
         **raw,
-        # Normalised fields
         "id":            ticker,
         "ticker":        ticker,
         "question":      title,
@@ -184,10 +276,11 @@ def _parse_market(raw: Dict) -> Dict:
         "category":      category,
         "yes_price":     yes_price,
         "no_price":      no_price,
-        "yes_bid":       yes_bid_c / 100,
-        "yes_ask":       yes_ask_c / 100,
-        "no_bid":        no_bid_c  / 100,
-        "no_ask":        no_ask_c  / 100,
+        "yes_bid":       yes_bid,
+        "yes_ask":       yes_ask,
+        "no_bid":        no_bid,
+        "no_ask":        no_ask,
+        "has_price":     has_price,
         "volume":        volume,
         "volume_24h":    volume_24h,
         "liquidity":     liquidity,
@@ -219,7 +312,7 @@ class KalshiDataFetcher:
             logger.warning("KALSHI_API_KEY / KALSHI_PRIVATE_KEY not set — cannot fetch markets")
             return []
         try:
-            params: Dict = {"status": "active", "limit": min(limit, 1000)}
+            params: Dict = {"status": "open", "limit": min(limit, 1000)}
             if cursor:
                 params["cursor"] = cursor
             data = _get("/markets", params, ttl=_TTL_MARKET_LIST)
@@ -264,7 +357,7 @@ class KalshiDataFetcher:
         if not _has_credentials():
             return []
         try:
-            params = {"status": "active", "category": category.lower(), "limit": min(limit, 1000)}
+            params = {"status": "open", "category": category.lower(), "limit": min(limit, 1000)}
             data = _get("/markets", params, ttl=_TTL_MARKET_LIST)
             return [_parse_market(m) for m in data.get("markets", [])]
         except Exception as e:
@@ -280,15 +373,29 @@ class KalshiDataFetcher:
         market = self.get_market(ticker)
         if not market:
             return None
-        yes_price = market["yes_price"]
-        no_price  = market["no_price"]
+        yes_price = market.get("yes_price")
+        no_price  = market.get("no_price")
+        if yes_price is None and no_price is None:
+            return {
+                "ticker":    ticker,
+                "market_id": ticker,
+                "yes_price": None,
+                "no_price":  None,
+                "mid_price": None,
+                "spread":    None,
+                "has_price": False,
+                "timestamp": market.get("expires_at", datetime.utcnow().isoformat()),
+            }
+        yes_bid = market.get("yes_bid") or 0
+        yes_ask = market.get("yes_ask") or 0
         return {
             "ticker":    ticker,
             "market_id": ticker,
             "yes_price": yes_price,
             "no_price":  no_price,
-            "mid_price": round((yes_price + no_price) / 2, 4),
-            "spread":    round(abs(market["yes_ask"] - market["yes_bid"]), 4),
+            "mid_price": round((yes_price + (no_price or 1 - yes_price)) / 2, 4),
+            "spread":    round(abs(yes_ask - yes_bid), 4),
+            "has_price": True,
             "timestamp": market.get("expires_at", datetime.utcnow().isoformat()),
         }
 

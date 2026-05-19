@@ -1,8 +1,11 @@
 import axios from 'axios'
 
 // 创建axios实例
+// baseURL is intentionally left empty so all requests use relative paths (e.g. /api/...)
+// This allows the Vite dev-server proxy (/api -> http://localhost:5001) to work correctly
+// and avoids CORS issues. In production, set VITE_API_BASE_URL if the API is on a different origin.
 const service = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 300000, // 5分钟超时（本体生成可能需要较长时间）
   headers: {
     'Content-Type': 'application/json'

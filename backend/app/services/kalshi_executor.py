@@ -30,6 +30,11 @@ logger = logging.getLogger("mirofish.kalshi_executor")
 _PROD_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 _DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
+# Module-level order log: persists across executor instances within a process.
+# Merges with live Kalshi orders so placed orders stay visible in the Portfolio
+# tab even when Kalshi's demo sandbox doesn't persist them.
+_order_log: Dict[str, Dict] = {}
+
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -50,7 +55,14 @@ def _sign(api_key_id: str, private_key_pem: str, method: str, path: str) -> Dict
 
         ts = str(int(time.time() * 1000))
         msg = (ts + method.upper() + f"/trade-api/v2{path}").encode()
-        sig = private_key.sign(msg, asym_padding.PKCS1v15(), hashes.SHA256())
+        sig = private_key.sign(
+            msg,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
 
         return {
             "KALSHI-ACCESS-KEY": api_key_id,
@@ -241,14 +253,15 @@ class KalshiExecutor:
     # =========================================================================
 
     def get_active_orders(self) -> List[Dict]:
-        """Return open/resting orders from Kalshi (or dry-run cache)."""
+        """Return recent orders from Kalshi (or dry-run cache)."""
         if self.dry_run:
             return [o for o in self._orders.values() if o.get("status") == "dry_run"]
 
         if not self.api_key:
             return []
         try:
-            data = self._get("/portfolio/orders", {"status": "resting"})
+            # Fetch all statuses so resting, pending, and recently executed orders all appear
+            data = self._get("/portfolio/orders", {"limit": 50})
             return data.get("orders", [])
         except Exception as e:
             logger.error(f"Failed to fetch Kalshi orders: {e}")

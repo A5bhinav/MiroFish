@@ -238,10 +238,13 @@ def place_trade():
     try:
         body = request.get_json(force=True) or {}
 
-        # Check authorization (would be done via API key in production)
-        api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
-        if api_key != Config.POLYMARKET_API_KEY and Config.POLYMARKET_API_KEY:
-            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        # Authorization: when live trading is enabled (not dry_run), require a
+        # matching Bearer token. In dry_run we allow unauthenticated calls so the
+        # UI can simulate trades without exposing the live key.
+        if not Config.POLYMARKET_DRY_RUN:
+            api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+            if not Config.POLYMARKET_API_KEY or api_key != Config.POLYMARKET_API_KEY:
+                return jsonify({"success": False, "error": "Unauthorized"}), 401
 
         # Import executor (lazy load to avoid requiring py-clob-client in all cases)
         from ..services.polymarket_executor import PolymarketExecutor
@@ -265,6 +268,25 @@ def place_trade():
                 "success": False,
                 "error": "Missing required fields: market_id, side, amount, price"
             }), 400
+
+        # Stale-price guard: refresh live quote and reject if it has moved
+        # more than 3¢ from the requested price. Skipped on dry runs.
+        if not Config.POLYMARKET_DRY_RUN:
+            try:
+                pricing = data_fetcher.get_current_price(market_id)
+                live_yes = pricing.get("yes_price") if pricing else None
+                if live_yes is None:
+                    return jsonify({"success": False, "error": f"Could not fetch live price for {market_id}"}), 503
+                reference = float(price) if "YES" in side.upper() else 1 - float(price)
+                live_ref = live_yes if "YES" in side.upper() else 1 - live_yes
+                if abs(reference - live_ref) > 0.03:
+                    return jsonify({
+                        "success": False,
+                        "error": f"Price moved: live={live_yes:.2f} vs requested={float(price):.2f}. Refresh and retry.",
+                        "live_yes_price": live_yes,
+                    }), 409
+            except Exception as e:
+                logger.warning(f"Stale-price check failed (continuing): {e}")
 
         # Place order
         order = executor.place_order(

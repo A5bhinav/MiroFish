@@ -3,6 +3,8 @@ MiroFish Backend - Flask应用工厂
 """
 
 import os
+import threading
+import time
 import warnings
 
 # 抑制 multiprocessing resource_tracker 的警告（来自第三方库如 transformers）
@@ -14,6 +16,56 @@ from flask_cors import CORS
 
 from .config import Config
 from .utils.logger import setup_logger, get_logger
+
+
+_SNAPSHOT_INTERVAL_HOURS = 24
+
+
+def _snapshot_worker():
+    """Daemon thread: collect + resolve market snapshots once per day."""
+    sched_logger = get_logger("mirofish.snapshot_scheduler")
+    sched_logger.info("Snapshot scheduler started (interval: 24h)")
+
+    # Wait for app to fully initialize before first run
+    time.sleep(10)
+
+    while True:
+        try:
+            from .ml.data_pipeline import collect_market_snapshots, resolve_market_snapshots
+            from .services.polymarket_data_fetcher import PolymarketDataFetcher
+
+            polymarket_fetcher = PolymarketDataFetcher()
+
+            kalshi_fetcher = None
+            try:
+                from .services.kalshi_data_fetcher import KalshiDataFetcher
+                from .config import Config as _Config
+                if _Config.KALSHI_API_KEY and _Config.KALSHI_PRIVATE_KEY:
+                    kalshi_fetcher = KalshiDataFetcher()
+            except Exception:
+                pass
+
+            resolved = resolve_market_snapshots(
+                kalshi_fetcher=kalshi_fetcher,
+                polymarket_fetcher=polymarket_fetcher,
+            )
+            saved = collect_market_snapshots(
+                kalshi_fetcher=kalshi_fetcher,
+                polymarket_fetcher=polymarket_fetcher,
+                max_markets=200,
+            )
+            sched_logger.info(f"Snapshot run complete: {saved} new, {resolved} resolved")
+
+        except Exception as e:
+            sched_logger.error(f"Snapshot run failed: {e}")
+
+        time.sleep(_SNAPSHOT_INTERVAL_HOURS * 3600)
+
+
+def _start_snapshot_scheduler(logger):
+    t = threading.Thread(target=_snapshot_worker, name="snapshot-scheduler", daemon=True)
+    t.start()
+    logger.info("Market snapshot scheduler started (24h interval)")
 
 
 def create_app(config_class=Config):
@@ -47,6 +99,11 @@ def create_app(config_class=Config):
     SimulationRunner.register_cleanup()
     if should_log_startup:
         logger.info("已注册模拟进程清理函数")
+
+    # Start background snapshot scheduler (runs once per day).
+    # Skipped in the Werkzeug reloader parent process to avoid double-starting.
+    if should_log_startup:
+        _start_snapshot_scheduler(logger)
     
     # 请求日志中间件
     @app.before_request

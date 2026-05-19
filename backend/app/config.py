@@ -88,5 +88,14 @@ class Config:
             errors.append("LLM_API_KEY 未配置")
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")
+        # If live trading is enabled, the corresponding credentials must exist.
+        if not cls.KALSHI_DRY_RUN:
+            if not cls.KALSHI_API_KEY or not cls.KALSHI_PRIVATE_KEY:
+                errors.append("KALSHI_DRY_RUN=False but KALSHI_API_KEY / KALSHI_PRIVATE_KEY missing")
+        if not cls.POLYMARKET_DRY_RUN:
+            if not cls.POLYMARKET_PRIVATE_KEY:
+                errors.append("POLYMARKET_DRY_RUN=False but POLYMARKET_PRIVATE_KEY missing")
+            if cls.POLYMARKET_MODE == "rest" and not cls.POLYMARKET_API_KEY:
+                errors.append("POLYMARKET_DRY_RUN=False with mode=rest requires POLYMARKET_API_KEY")
         return errors
 

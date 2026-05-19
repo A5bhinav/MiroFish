@@ -159,7 +159,9 @@ def predict():
         if ticker:
             market = data_fetcher.get_market(ticker)
             if market:
-                yes_price     = market["yes_price"]
+                live_price = market.get("yes_price")
+                if live_price is not None:
+                    yes_price = live_price
                 days_to_close = market.get("days_to_close", days_to_close)
                 category      = market.get("category", category)
                 if not question:
@@ -228,7 +230,9 @@ def predict_batch():
             if ticker and "yes_price" not in m:
                 live = data_fetcher.get_market(ticker)
                 if live:
-                    yes_price = live["yes_price"]
+                    live_price = live.get("yes_price")
+                    if live_price is not None:
+                        yes_price = live_price
                     days_cls  = live.get("days_to_close", days_cls)
                     category  = live.get("category", category)
                     if not question:
@@ -316,6 +320,24 @@ def place_trade():
                 "success": False,
                 "error":   "Missing required fields: ticker, side, amount, price"
             }), 400
+
+        # Stale-price guard: reject if live price has moved >3¢ from limit.
+        # Skipped on dry runs and when the market has no active bids/asks.
+        if not getattr(Config, "KALSHI_DRY_RUN", True):
+            try:
+                live = data_fetcher.get_market(ticker)
+                live_yes = live.get("yes_price") if live else None
+                if live_yes is not None:
+                    reference = float(price) if "YES" in side.upper() else 1 - float(price)
+                    live_ref  = live_yes if "YES" in side.upper() else 1 - live_yes
+                    if abs(reference - live_ref) > 0.03:
+                        return jsonify({
+                            "success": False,
+                            "error": f"Price moved: live={live_yes:.2f} vs requested={float(price):.2f}. Refresh and retry.",
+                            "live_yes_price": live_yes,
+                        }), 409
+            except Exception as e:
+                logger.warning(f"Stale-price check failed (continuing): {e}")
 
         from ..services.kalshi_executor import KalshiExecutor
         executor = KalshiExecutor(

@@ -345,24 +345,45 @@ class KalshiPredictor:
             edge_signal = "NEUTRAL (model agrees with market)"
             bet_size = "skip"
 
-        # Kelly criterion sizing (fractional)
-        p = calibrated
-        b = 1.0  # Even money approximation for small adjustments
-        kelly = (b * p - (1 - p)) / b  # Full Kelly
-        fraction_kelly = max(0, kelly * 0.25)  # Quarter Kelly for safety
+        # Kelly criterion sizing (fractional).
+        # Binary contracts: stake `market_price` to win `(1 - market_price)`,
+        # so payout odds b = (1 - market_price) / market_price.
+        # f* = (b*p - (1-p)) / b = p - (1-p)/b
+        # When market and model disagree on direction, bet the other side.
+        p_model = calibrated
+        if calibrated >= raw_prob:
+            # Bet YES at price = raw_prob
+            stake_price = max(0.01, min(0.99, raw_prob))
+            p_win = p_model
+        else:
+            # Bet NO at price = 1 - raw_prob; p_win is model's NO prob
+            stake_price = max(0.01, min(0.99, 1 - raw_prob))
+            p_win = 1 - p_model
+        b = (1 - stake_price) / stake_price
+        kelly = (b * p_win - (1 - p_win)) / b
+        fraction_kelly = max(0.0, min(0.25, kelly * 0.25))  # Quarter Kelly, capped
 
         if not factors:
             factors.append(f"Market price {raw_prob:.0%} used as anchor; calibration adjustment: {adjustment:+.1%}")
 
+        # Normalize edge_signal to the short tokens the UI compares against
+        # ("BUY YES" / "BUY NO" / "NEUTRAL") and expose numeric edge.
+        signal_short = (
+            "BUY YES" if edge_signal.startswith("BUY YES")
+            else "BUY NO" if edge_signal.startswith("BUY NO")
+            else "NEUTRAL"
+        )
         return {
             "market_question": market_question,
             "yes_probability": round(calibrated, 4),
             "no_probability": round(1 - calibrated, 4),
             "raw_market_prob": round(raw_prob, 4),
+            "edge": round(calibrated - raw_prob, 4),
             "calibration_adjustment": round(adjustment, 4),
             "base_rate": round(base_rate, 3) if base_rate else None,
             "confidence": confidence,
-            "edge_signal": edge_signal,
+            "edge_signal": signal_short,
+            "edge_signal_long": edge_signal,
             "factors": factors,
             "kelly_fraction": round(fraction_kelly, 3),
             "suggested_bet_size": bet_size,

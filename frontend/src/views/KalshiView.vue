@@ -129,13 +129,13 @@
             <div class="price-block yes-block">
               <div class="price-label">YES</div>
               <div class="price-val">{{ pct(selectedMarket.yes_price) }}</div>
-              <div class="price-cents">{{ Math.round((selectedMarket.yes_price || 0) * 100) }}¢</div>
+              <div class="price-cents">{{ selectedMarket.yes_price != null ? Math.round(selectedMarket.yes_price * 100) + '¢' : '' }}</div>
             </div>
             <div class="price-divider">VS</div>
             <div class="price-block no-block">
               <div class="price-label">NO</div>
-              <div class="price-val no-val">{{ pct(1 - (selectedMarket.yes_price || 0.5)) }}</div>
-              <div class="price-cents">{{ Math.round((1 - (selectedMarket.yes_price || 0.5)) * 100) }}¢</div>
+              <div class="price-val no-val">{{ pct(selectedMarket.no_price) }}</div>
+              <div class="price-cents">{{ selectedMarket.no_price != null ? Math.round(selectedMarket.no_price * 100) + '¢' : '' }}</div>
             </div>
           </div>
 
@@ -247,7 +247,7 @@
             <div v-if="tradeResult" class="trade-result" :class="{ 'result-ok': !tradeResult.error, 'result-err': tradeResult.error }">
               <div class="result-status">{{ tradeResult.error ? 'FAILED' : (tradeResult.dry_run ? 'DRY RUN ACCEPTED' : 'ORDER PLACED') }}</div>
               <div class="result-id" v-if="tradeResult.order_id">ID: {{ tradeResult.order_id }}</div>
-              <div class="result-detail">
+              <div class="result-detail" v-if="tradeResult.count">
                 {{ tradeResult.count }} contracts · {{ tradeResult.price_cents }}¢ · ${{ tradeResult.amount_usd?.toFixed(2) }}
               </div>
               <div class="result-error" v-if="tradeResult.error">{{ tradeResult.error }}</div>

@@ -1,3 +1,17 @@
 {
-  "training_stats": {}
+  "training_stats": {
+    "n_training": 607,
+    "baseline_brier": 0.0847,
+    "calibrated_brier": 0.0781,
+    "calibration_improvement": 0.0065,
+    "category_stats": {
+      "unknown": {
+        "n": 607,
+        "resolution_rate": 0.415,
+        "brier_before": 0.0847,
+        "brier_after": 0.0781
+      }
+    },
+    "econ_feature_rows": 940
+  }
 }
